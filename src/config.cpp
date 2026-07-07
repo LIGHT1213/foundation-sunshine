@@ -156,6 +156,7 @@ namespace config {
   #include <AMF/components/VideoEncoderVCE.h>
 #endif
 
+#if !defined(__ANDROID__) && !defined(__APPLE__)
     enum class quality_av1_e : int {
       speed = AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_SPEED,  ///< Speed preset
       quality = AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_QUALITY,  ///< Quality preset
@@ -233,7 +234,11 @@ namespace config {
       cabac = AMF_VIDEO_ENCODER_CABAC,  ///< CABAC
       cavlc = AMF_VIDEO_ENCODER_CALV  ///< CAVLC
     };
+#endif  // !__ANDROID__ && !__APPLE__
 
+    // NOTE: the from_view helpers below are only meaningful on platforms that
+    // have the AMD encoder (Windows). They reference the AMF enum values above.
+#if !defined(__ANDROID__) && !defined(__APPLE__)
     template <class T>
     std::optional<int>
     quality_from_view(const std::string_view &quality_type, const std::optional<int>(&original)) {
@@ -284,6 +289,7 @@ namespace config {
 
       return _auto;
     }
+#endif  // !__ANDROID__ && !__APPLE__
   }  // namespace amd
 
   namespace qsv {
@@ -430,7 +436,11 @@ namespace config {
       std::nullopt,  // quality (av1): driver default, matching FFmpeg amfenc
       std::nullopt,  // preanalysis: unset by default, matching FFmpeg amfenc
       std::nullopt,  // vbaq: unset by default, matching FFmpeg amfenc
+#if !defined(__ANDROID__) && !defined(__APPLE__)
       (int) amd::coder_e::_auto,  // coder
+#else
+      0,  // coder: AMF not available, placeholder
+#endif
       23,  // qvbr_quality (1-51, default 23)
       0,  // ltr_frames
       0,  // slices_per_frame
@@ -1181,6 +1191,7 @@ namespace config {
     int_f(vars, "qsv_coder", video.qsv.qsv_cavlc, qsv::coder_from_view);
     bool_f(vars, "qsv_slow_hevc", video.qsv.qsv_slow_hevc);
 
+#if !defined(__ANDROID__) && !defined(__APPLE__)
     std::string quality;
     string_f(vars, "amd_quality", quality);
     if (!quality.empty()) {
@@ -1205,6 +1216,7 @@ namespace config {
       video.amd.amd_usage_hevc = amd::usage_from_view<amd::usage_hevc_e>(usage, video.amd.amd_usage_hevc);
       video.amd.amd_usage_av1 = amd::usage_from_view<amd::usage_av1_e>(usage, video.amd.amd_usage_av1);
     }
+#endif  // !__ANDROID__ && !__APPLE__
 
     // HQVBR/HQCBR requires two-pass encoding, incompatible with Ultra Low Latency usage.
     // Auto-upgrade usage to Low Latency High Quality when necessary.

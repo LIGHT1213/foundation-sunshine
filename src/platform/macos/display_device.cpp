@@ -98,7 +98,7 @@ namespace display_device {
   }
 
   settings_t::apply_result_t
-  settings_t::apply_config(const parsed_config_t &) {
+  settings_t::apply_config(const parsed_config_t &, const rtsp_stream::launch_session_t &, const boost::optional<active_topology_t> &) {
     // Not implemented
     return { apply_result_t::result_e::success };
   }
@@ -114,6 +114,42 @@ namespace display_device {
   void
   settings_t::reset_persistence() {
     // Not implemented
+  }
+
+  // The following methods are only invoked from the Windows session_t logic
+  // (guarded by #ifdef _WIN32 in session.cpp). They are defined here as no-ops
+  // so the type is complete and links cleanly; they are never called on macOS.
+  void
+  settings_t::capture_audio_sink() {
+    // Not implemented
+  }
+
+  void
+  settings_t::release_audio_sink() {
+    // Not implemented
+  }
+
+  // set_filepath is provided by the cross-platform src/display_device/settings.cpp.
+
+  bool
+  settings_t::has_persistent_data() const {
+    return false;
+  }
+
+  bool
+  settings_t::is_vdd_in_initial_topology() const {
+    return false;
+  }
+
+  void
+  settings_t::remove_vdd_from_initial_topology(const std::string &vdd_id) {
+    (void)vdd_id;
+  }
+
+  void
+  settings_t::replace_vdd_id(const std::string &old_id, const std::string &new_id) {
+    (void)old_id;
+    (void)new_id;
   }
 
 }  // namespace display_device

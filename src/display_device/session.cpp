@@ -1,21 +1,28 @@
 // standard includes
 #include <boost/optional/optional_io.hpp>
-#include <boost/process/v1.hpp>
 #include <future>
 #include <thread>
 
 // local includes
 #include "parsed_config.h"
 #include "session.h"
-#include "src/confighttp.h"
-#include "src/globals.h"
 #include "src/platform/common.h"
-#include "src/platform/windows/display_device/session_listener.h"
-#include "src/platform/windows/display_device/windows_utils.h"
 #include "src/rtsp.h"
 #include "to_string.h"
-#include "vdd_ioctl.h"
 #include "vdd_utils.h"
+
+#ifdef _WIN32
+// Windows-only session implementation (ZakoVDD lifecycle, CCD topology,
+// display prep, HDR state, retry timers). macOS/Linux provide no-op stubs
+// in the `#else` branch below.
+
+  #include <boost/process/v1.hpp>
+
+  #include "src/confighttp.h"
+  #include "src/globals.h"
+  #include "src/platform/windows/display_device/session_listener.h"
+  #include "src/platform/windows/display_device/windows_utils.h"
+  #include "vdd_ioctl.h"
 
 namespace display_device {
 
@@ -133,7 +140,7 @@ namespace display_device {
   session_t::deinit_t::~deinit_t() {
     // 清理事件监听器
     SessionEventListener::deinit();
-    
+
     // 兜底：退出时如果 VDD 仍存在且 vdd_keep_enabled=false，直接销毁
     // 使用 nolog 版本，因为析构时 boost::log 可能已被销毁
     if (!config::video.vdd_keep_enabled) {
@@ -150,10 +157,10 @@ namespace display_device {
   std::unique_ptr<session_t::deinit_t>
   session_t::init() {
     session_t::get().settings.set_filepath(platf::appdata() / "original_display_settings.json");
-    
+
     // 初始化会话事件监听器（用于检测解锁事件）
     SessionEventListener::init();
-    
+
     session_t::get().restore_state();
     return std::make_unique<deinit_t>();
   }
@@ -357,14 +364,14 @@ namespace display_device {
     // 在 make_parsed_config 之前保存真实的初始拓扑
     // 因为 make_parsed_config 内部会调用 prepare_vdd，它会创建VDD并切换到扩展模式，导致原有显示器变成inactive
     boost::optional<active_topology_t> pre_saved_initial_topology;
-    
+
     // 检查是否会使用VDD
     const auto display_request = resolve_display_request(config, session);
-    
+
     // 检查VDD是否已存在
     const auto existing_vdd_id = display_device::find_device_by_friendlyname(ZAKO_NAME);
     const bool vdd_already_exists = !existing_vdd_id.empty();
-    
+
     // 如果会使用VDD且VDD当前不存在，在创建前保存拓扑
     // 如果VDD已存在，说明拓扑已被破坏，不应该保存当前拓扑
     const auto requested_device_id = display_device::find_one_of_the_available_devices(display_request.device_id);
@@ -582,7 +589,7 @@ namespace display_device {
     // Rebuild VDD device on client switch
     if (!device_zako.empty() && !current_vdd_client_id.empty() &&
         !current_client_id.empty() && current_vdd_client_id != current_client_id) {
-      
+
       // 是否复用VDD（由独立配置项控制）
       const bool reuse_vdd = config::video.vdd_reuse;
 
@@ -594,12 +601,12 @@ namespace display_device {
       else {
         // 不复用：销毁并重建VDD（每个客户端独立VDD）
         BOOST_LOG(info) << "独立VDD模式，重建VDD设备（客户端: " << current_vdd_client_id << " -> " << current_client_id << "）";
-        
+
         const auto old_vdd_id = device_zako;
         destroy_vdd_monitor();
         clear_vdd_state();
         device_zako.clear();
-        
+
         // Handle VDD ID in persistent_data
         if (config::video.vdd_keep_enabled) {
           // 常驻模式：需要替换ID（保留VDD在persistent_data中）
@@ -612,7 +619,7 @@ namespace display_device {
           BOOST_LOG(debug) << "从initial拓扑中移除VDD: " << old_vdd_id;
           settings.remove_vdd_from_initial_topology(old_vdd_id);
         }
-        
+
         std::this_thread::sleep_for(500ms);
       }
     }
@@ -683,7 +690,7 @@ namespace display_device {
       should_replace_vdd_id_ = false;
       old_vdd_id_.clear();
     }
-    
+
     // Update configuration and state
     config.device_id = device_zako;
     config::video.output_name = device_zako;
@@ -746,7 +753,7 @@ namespace display_device {
     // 此时不需要恢复拓扑（没有拓扑被修改过），只需要清理可能残留的 VDD
     if (!current_use_vdd.has_value()) {
       BOOST_LOG(debug) << " 无会话配置（current_use_vdd=nullopt），仅执行 VDD 清理";
-      
+
       if (!vdd_id.empty() && !is_keep_enabled) {
         if (settings.has_persistent_data()) {
           BOOST_LOG(info) << "非常驻模式，销毁残留 VDD";
@@ -791,10 +798,10 @@ namespace display_device {
     const auto device_prep = is_vdd_mode
       ? display_prep
       : parsed_config_t::to_physical_device_prep(display_prep);
-    
+
     // 判断是否是无操作模式（会话配置了 no_operation，意味着拓扑从未被修改过）
     // VDD模式看 vdd_prep，普通模式看 device_prep
-    const bool is_no_operation = is_vdd_mode 
+    const bool is_no_operation = is_vdd_mode
       ? (vdd_prep == parsed_config_t::vdd_prep_e::no_operation)
       : (device_prep == parsed_config_t::device_prep_e::no_operation);
 
@@ -811,7 +818,7 @@ namespace display_device {
     // VDD 销毁逻辑
     if (!vdd_id.empty()) {
       bool should_destroy = false;
-      
+
       // 判断1：常驻模式 - 保留VDD
       if (is_keep_enabled) {
         BOOST_LOG(debug) << "常驻模式，保留VDD";
@@ -855,20 +862,20 @@ namespace display_device {
     // 添加诊断日志
     const bool settings_will_fail = settings.is_changing_settings_going_to_fail();
     BOOST_LOG(debug) << "Checking if reverting settings will fail: " << settings_will_fail;
-    
+
     // VDD生命周期已在上面的逻辑中决定（销毁或保留），通知revert_settings不要再处理VDD销毁
     const bool vdd_already_handled = true;
-    
+
     if (!settings_will_fail && settings.revert_settings(reason, vdd_already_handled)) {
       stop_timer_and_clear_vdd_state();
     }
     else {
       // 无法立即恢复，添加任务到解锁队列
       BOOST_LOG(warning) << "无法立即恢复显示设置";
-      
+
       // 设置待恢复标志
       pending_restore_ = true;
-      
+
       // 添加恢复任务（自动处理锁屏检查和立即执行）
       SessionEventListener::add_unlock_task([this, reason]() {
         // 快速检查是否还需要恢复（最小化锁持有时间）
@@ -879,7 +886,7 @@ namespace display_device {
             return;
           }
         }
-        
+
         // 在锁外执行CCD检查和恢复操作（避免阻塞托盘等其他操作）
         if (settings.is_changing_settings_going_to_fail()) {
           BOOST_LOG(warning) << "CCD API仍不可用，启动轮询机制";
@@ -887,11 +894,11 @@ namespace display_device {
           this->start_polling_restore(reason);
           return;
         }
-        
+
         // 执行恢复
         auto result = settings.revert_settings(reason, true);
         BOOST_LOG(info) << "恢复显示设置" << (result ? "成功" : "失败");
-        
+
         // 恢复完成后清除标志和状态
         {
           std::lock_guard lock { mutex };
@@ -913,7 +920,7 @@ namespace display_device {
         BOOST_LOG(debug) << "恢复操作已取消，跳过";
         return true;
       }
-      
+
       if (settings.is_changing_settings_going_to_fail()) {
         const int current_count = polling_retry_count_.fetch_add(1, boost::memory_order_relaxed) + 1;
         if (current_count >= max_retries) {
@@ -939,3 +946,131 @@ namespace display_device {
       timer { std::make_unique<StateRetryTimer>(mutex) } {
   }
 }  // namespace display_device
+
+#else
+// =============================================================================
+// Non-Windows (macOS / Linux) session_t stub.
+//
+// The ZakoVDD virtual display subsystem, CCD topology manipulation, and the
+// associated retry/state-recovery machinery are Windows-only. On other
+// platforms every session_t method is a no-op so the shared callers in
+// main.cpp / nvhttp.cpp / nvhttp_stream_start.cpp / confighttp.cpp /
+// system_tray.cpp link and run, but no display device reconfiguration happens.
+// =============================================================================
+
+namespace display_device {
+
+  // Non-Windows placeholder for the Windows-only StateRetryTimer.
+  // session_t holds it via unique_ptr; on non-Windows it is never constructed,
+  // but the type must be complete so the compiler-generated session_t destructor
+  // can destroy the unique_ptr member (and the empty stub constructor below
+  // sets it to nullptr).
+  class session_t::StateRetryTimer {
+  public:
+    StateRetryTimer(std::mutex &, std::chrono::seconds = std::chrono::seconds { 5 }) {}
+  };
+
+  session_t::deinit_t::~deinit_t() = default;
+
+  session_t &
+  session_t::get() {
+    static session_t session;
+    return session;
+  }
+
+  std::unique_ptr<session_t::deinit_t>
+  session_t::init() {
+    // No display-device session lifecycle on non-Windows platforms.
+    return std::make_unique<deinit_t>();
+  }
+
+  session_t::configure_result_t
+  session_t::configure_display(const config::video_t &,
+    const rtsp_stream::launch_session_t &, bool) {
+    // Nothing to configure on non-Windows; report success so the stream can start.
+    return { configure_result_t::result_e::success, {}, {} };
+  }
+
+  void
+  session_t::restore_state() {
+    // No-op.
+  }
+
+  void
+  session_t::reset_persistence() {
+    // No-op.
+  }
+
+  bool
+  session_t::create_vdd_monitor(const std::string &) {
+    return false;  // VDD not supported on non-Windows.
+  }
+
+  bool
+  session_t::destroy_vdd_monitor() {
+    return false;  // VDD not supported on non-Windows.
+  }
+
+  bool
+  session_t::is_display_on() {
+    return false;  // No VDD display power control on non-Windows.
+  }
+
+  bool
+  session_t::toggle_display_power() {
+    return false;  // No VDD display power control on non-Windows.
+  }
+
+  void
+  session_t::enable_vdd() {
+    // No-op.
+  }
+
+  void
+  session_t::disable_vdd() {
+    // No-op.
+  }
+
+  void
+  session_t::disable_enable_vdd() {
+    // No-op.
+  }
+
+  void
+  session_t::prepare_vdd(parsed_config_t &, const rtsp_stream::launch_session_t &) {
+    // No-op.
+  }
+
+  // Private helpers referenced by session.h but only meaningful on Windows.
+  // They are defined here as empty so the type is complete; they are never
+  // called on non-Windows platforms.
+  void
+  session_t::restore_state_impl(revert_reason_e) {
+    // No-op.
+  }
+
+  void
+  session_t::start_polling_restore(revert_reason_e) {
+    // No-op.
+  }
+
+  void
+  session_t::clear_vdd_state() {
+    // No-op.
+  }
+
+  void
+  session_t::stop_timer_and_clear_vdd_state() {
+    // No-op.
+  }
+
+  void
+  session_t::update_vdd_resolution(const parsed_config_t &, const vdd_utils::VddSettings &) {
+    // No-op.
+  }
+
+  session_t::session_t() = default;
+
+}  // namespace display_device
+
+#endif  // _WIN32

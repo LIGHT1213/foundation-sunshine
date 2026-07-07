@@ -123,9 +123,12 @@ mainThreadLoop(const std::shared_ptr<safe::event_t<bool>> &shutdown_event) {
     return;
   }
 
-  // Main thread event loop
+  // Main thread event loop (only meaningful when the tray is enabled;
+  // otherwise run_loop is false and we returned above).
   BOOST_LOG(info) << "Starting main loop"sv;
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
   while (system_tray::process_tray_events() == 0);
+#endif
   BOOST_LOG(info) << "Main loop has exited"sv;
 }
 
@@ -445,7 +448,9 @@ main(int argc, char *argv[]) {
 
   mainThreadLoop(shutdown_event);
 
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
   system_tray::end_tray();
+#endif
   try {
     display_device::session_t::get().restore_state();
   }

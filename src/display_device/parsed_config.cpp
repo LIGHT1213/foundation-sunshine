@@ -11,8 +11,10 @@
 #include "src/config.h"
 #include "src/globals.h"
 #include "src/logging.h"
-#include "src/platform/windows/display_device/windows_utils.h"
-#include "src/platform/windows/misc.h"
+#ifdef _WIN32
+  #include "src/platform/windows/display_device/windows_utils.h"
+  #include "src/platform/windows/misc.h"
+#endif
 #include "src/rtsp.h"
 #include "to_string.h"
 
@@ -686,6 +688,7 @@ namespace display_device {
                      << "\n刷新率: "sv << (parsed_config.refresh_rate ? to_string(*parsed_config.refresh_rate) : "不变")
                      << "\n"sv;
 
+#ifdef _WIN32
     // 检查是否需要使用VDD
     const auto requested_device_id = display_device::find_one_of_the_available_devices(parsed_config.device_id);
     const bool requested_device_exists = !requested_device_id.empty();
@@ -732,6 +735,15 @@ namespace display_device {
     display_device::session_t::get().prepare_vdd(parsed_config, session);
 
     return parsed_config;
+#else
+    // Non-Windows (macOS/Linux): no ZakoVDD virtual display subsystem.
+    // Always use the physical display path; VDD-related fields stay at their
+    // defaults and no virtual display is created.
+    parsed_config.use_vdd = false;
+    parsed_config.device_prep = parsed_config_t::to_physical_device_prep(parsed_config.device_prep);
+    parsed_config.vdd_prep = parsed_config_t::vdd_prep_e::no_operation;
+    return parsed_config;
+#endif
   }
 
 }  // namespace display_device

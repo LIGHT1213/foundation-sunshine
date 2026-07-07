@@ -115,6 +115,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_device/windows_utils.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_device/session_listener.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_device/session_listener.cpp"
+        "${CMAKE_SOURCE_DIR}/src/display_device/vdd_utils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/display_device/vdd_ioctl.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/src/ViGEmClient.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Client.h"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Common.h"

@@ -35,6 +35,7 @@
 #include <Simple-Web-Server/crypto.hpp>
 #include <Simple-Web-Server/server_https.hpp>
 #include <boost/asio/ssl/context_base.hpp>
+#include <boost/regex.hpp>
 
 #include "config.h"
 #include "confighttp.h"
@@ -640,7 +641,8 @@ namespace confighttp {
     static constexpr std::uintmax_t MAX_LOG_CACHE_SIZE = 4 * 1024 * 1024;   // 4 MB
     static constexpr std::uintmax_t MAX_RESPONSE_SIZE  = 4 * 1024 * 1024;   // 4 MB
 
-    static std::atomic<std::shared_ptr<const LogCacheSnapshot>> log_cache;
+    static std::shared_ptr<const LogCacheSnapshot> log_cache;
+    static std::mutex log_cache_mutex;
 
     // Check file status
     std::error_code ec;
@@ -657,7 +659,11 @@ namespace confighttp {
     auto current_mtime_ns = current_mtime.time_since_epoch().count();
 
     // Refresh cache if file changed
-    auto snapshot = log_cache.load();
+    std::shared_ptr<const LogCacheSnapshot> snapshot;
+    {
+      std::lock_guard lock(log_cache_mutex);
+      snapshot = log_cache;
+    }
     const bool cache_stale = !snapshot || current_size != snapshot->file_size || current_mtime_ns != snapshot->mtime_ns;
     if (cache_stale) {
       auto new_snap = std::make_shared<LogCacheSnapshot>();
@@ -692,12 +698,21 @@ namespace confighttp {
         new_snap->start_offset = 0;
       }
 
-      // CAS publish: avoid overwriting a newer snapshot from a concurrent thread
-      if (!log_cache.compare_exchange_strong(snapshot, new_snap)) {
-        // CAS failed: snapshot already updated by compare_exchange_strong
-      }
-      else {
-        snapshot = std::move(new_snap);
+      // CAS-equivalent publish under mutex: avoid overwriting a newer snapshot
+      // from a concurrent thread. Originally std::atomic<shared_ptr>::
+      // compare_exchange_strong; replaced with a mutex lock for portability
+      // (Apple's libc++ does not provide the std::atomic<shared_ptr> partial
+      // specialization).
+      {
+        std::lock_guard lock(log_cache_mutex);
+        if (log_cache == snapshot) {
+          snapshot = std::move(new_snap);
+          log_cache = snapshot;
+        }
+        else {
+          // CAS failed: a concurrent thread already published a newer snapshot.
+          snapshot = log_cache;
+        }
       }
     }
 
@@ -1430,10 +1445,12 @@ namespace confighttp {
     if (!authenticate(response, request)) return;
 
     print_req(request);
+#ifdef _WIN32
     if (GetConsoleWindow() == NULL) {
       lifetime::exit_sunshine(ERROR_SHUTDOWN_IN_PROGRESS, true);
       return;
     }
+#endif
     lifetime::exit_sunshine(0, true);
   }
 

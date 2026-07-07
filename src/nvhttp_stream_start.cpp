@@ -241,7 +241,12 @@ namespace nvhttp::stream_start {
     bool
     explicit_vdd_requested_for_launch(const rtsp_stream::launch_session_t &launch_session) {
       const auto display_request = display_device::resolve_display_request(config::video, launch_session);
+#ifdef _WIN32
       const bool is_vdd_device = display_device::get_display_friendly_name(display_request.device_id) == ZAKO_NAME;
+#else
+      // No ZakoVDD virtual display on non-Windows; a device can never be the VDD.
+      const bool is_vdd_device = false;
+#endif
       return display_request.use_vdd || is_vdd_device;
     }
 

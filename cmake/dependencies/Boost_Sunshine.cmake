@@ -3,8 +3,17 @@
 #
 include_guard(GLOBAL)
 
-set(BOOST_VERSION "1.91.0")
-set(BOOST_RELEASE_VERSION "1.91.0-1")
+# macOS local builds use the Homebrew Boost bottle (1.90.0); pin the requested
+# version to it so find_package does not fall back to a slow FetchContent source
+# build. The Boost API Sunshine uses is stable across these point releases.
+# Windows/Linux keep the upstream 1.91.0 pin (matched by their build-deps bottles).
+if(APPLE)
+    set(BOOST_VERSION "1.90.0")
+    set(BOOST_RELEASE_VERSION "1.90.0")
+else()
+    set(BOOST_VERSION "1.91.0")
+    set(BOOST_RELEASE_VERSION "1.91.0-1")
+endif()
 set(BOOST_COMPONENTS
         beast
         filesystem

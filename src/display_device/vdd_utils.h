@@ -1,6 +1,9 @@
 #pragma once
 
-#define WIN32_LEAN_AND_MEAN
+#ifdef _WIN32
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+#endif
 
 #include <chrono>
 #include <functional>
@@ -9,7 +12,6 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
-#include <windows.h>
 
 #include "parsed_config.h"
 
@@ -21,11 +23,7 @@ namespace display_device::vdd_utils {
   inline constexpr int kMaxRetryCount = 3;
   inline constexpr auto kInitialRetryDelay = 500ms;
   inline constexpr auto kMaxRetryDelay = 3000ms;
-
-  extern const wchar_t *kVddPipeName;
-  extern const DWORD kPipeTimeoutMs;
-  extern const DWORD kPipeBufferSize;
-  extern const std::chrono::milliseconds kDefaultDebounceInterval;
+  inline constexpr std::chrono::milliseconds kDefaultDebounceInterval = 1000ms;
 
   // HDR亮度范围结构
   struct hdr_brightness_t {
@@ -60,6 +58,49 @@ namespace display_device::vdd_utils {
   // 指数退避计算
   std::chrono::milliseconds
   calculate_exponential_backoff(int attempt);
+
+  // 重试函数模板
+  template <typename Func>
+  bool
+  retry_with_backoff(Func &&check_func, const RetryConfig &config) {
+    auto delay = config.initial_delay;
+
+    for (int attempt = 0; attempt < config.max_attempts; ++attempt) {
+      if (check_func()) {
+        return true;
+      }
+
+      if (attempt + 1 < config.max_attempts) {
+        std::this_thread::sleep_for(delay);
+        delay = std::min(config.max_delay, delay * 2);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @brief 从客户端标识符生成GUID字符串（用于驱动识别）
+   * @note 跨平台可用；在非 Windows 平台上为纯字符串哈希逻辑，不依赖 Win32 GUID API。
+   * @param identifier 客户端标识符，如果为空则返回空字符串
+   * @return GUID格式字符串: {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}，如果identifier为空则返回空字符串
+   */
+  std::string
+  generate_client_guid(const std::string &identifier);
+
+  /**
+   * @brief 从客户端配置中获取物理尺寸
+   * @param client_name 客户端名称
+   * @return 物理尺寸结构，如果未找到则返回默认值（0,0）
+   */
+  physical_size_t
+  get_client_physical_size(const std::string &client_name);
+
+#ifdef _WIN32
+  // ===== 以下声明仅 Windows 平台可用（依赖 ZakoVDD 驱动、命名管道、SetupAPI 等） =====
+
+  extern const wchar_t *kVddPipeName;
+  extern const DWORD kPipeTimeoutMs;
+  extern const DWORD kPipeBufferSize;
 
   // VDD命令执行
   bool
@@ -109,22 +150,6 @@ namespace display_device::vdd_utils {
    */
   set_vdd_result
   set_vdd_session_mode(const parsed_config_t &config, const VddSettings &settings);
-
-  /**
-   * @brief 从客户端标识符生成GUID字符串（用于驱动识别）
-   * @param identifier 客户端标识符，如果为空则返回空字符串
-   * @return GUID格式字符串: {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}，如果identifier为空则返回空字符串
-   */
-  std::string
-  generate_client_guid(const std::string &identifier);
-
-  /**
-   * @brief 从客户端配置中获取物理尺寸
-   * @param client_name 客户端名称
-   * @return 物理尺寸结构，如果未找到则返回默认值（0,0）
-   */
-  physical_size_t
-  get_client_physical_size(const std::string &client_name);
 
   /**
    * @brief 创建VDD监视器
@@ -185,23 +210,6 @@ namespace display_device::vdd_utils {
   VddSettings
   prepare_vdd_settings(const parsed_config_t &config);
 
-  // 重试函数模板
-  template <typename Func>
-  bool
-  retry_with_backoff(Func &&check_func, const RetryConfig &config) {
-    auto delay = config.initial_delay;
-
-    for (int attempt = 0; attempt < config.max_attempts; ++attempt) {
-      if (check_func()) {
-        return true;
-      }
-
-      if (attempt + 1 < config.max_attempts) {
-        std::this_thread::sleep_for(delay);
-        delay = std::min(config.max_delay, delay * 2);
-      }
-    }
-    return false;
-  }
+#endif  // _WIN32
 
 }  // namespace display_device::vdd_utils

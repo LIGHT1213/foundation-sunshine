@@ -10,6 +10,8 @@
 #include "src/config.h"
 #include "src/logging.h"
 
+#import <Metal/Metal.h>
+
 // Avoid conflict between AVFoundation and libavutil both defining AVMediaType
 #define AVMediaType AVMediaType_FFmpeg
 #include "src/video.h"
@@ -215,5 +217,30 @@ namespace platf {
   needs_encoder_reenumeration() {
     // We don't track GPU state, so we will always reenumerate. Fortunately, it is fast on macOS.
     return true;
+  }
+
+  std::vector<std::string>
+  adapter_names() {
+    // Enumerate Metal devices so the WebUI/encoder-probing can report the GPU.
+    // On Apple Silicon there is typically a single integrated GPU; on Intel
+    // Macs there may be discrete + integrated.
+    std::vector<std::string> names;
+
+    @autoreleasepool {
+      NSArray<id<MTLDevice>> *devices = MTLCopyAllDevices();
+      for (id<MTLDevice> device in devices) {
+        names.emplace_back(device.name.UTF8String);
+      }
+      if (names.empty()) {
+        id<MTLDevice> default_device = MTLCreateSystemDefaultDevice();
+        if (default_device) {
+          names.emplace_back(default_device.name.UTF8String);
+        }
+      }
+    }
+    if (names.empty()) {
+      names.emplace_back("default");
+    }
+    return names;
   }
 }  // namespace platf

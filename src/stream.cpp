@@ -282,6 +282,13 @@ namespace stream {
 
 #pragma pack(pop)
 
+  // RTP payload type marking remote-microphone packets that carry Opus-encoded
+  // audio (as opposed to PCM passthrough). Referenced by the mic-uplink path;
+  // the same value is produced by Moonlight clients that send Opus mic data.
+#ifndef MIC_PACKET_TYPE_OPUS
+  constexpr std::uint8_t MIC_PACKET_TYPE_OPUS = 0x60;  // dynamic payload type 96
+#endif
+
   constexpr std::size_t
   round_to_pkcs7_padded(std::size_t size) {
     return ((size + 15) / 16) * 16;
