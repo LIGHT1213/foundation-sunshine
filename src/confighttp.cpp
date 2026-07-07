@@ -48,6 +48,7 @@
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
+#include "perf_recorder.h"
 #include "platform/common.h"
 #include "platform/run_command.h"
 #include "rtsp.h"
@@ -1964,6 +1965,48 @@ namespace confighttp {
   }
 
   void
+  getPerfCurrent(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+
+    print_req(request);
+
+    auto client_address = request->remote_endpoint().address();
+    auto address = net::addr_to_normalized_string(client_address);
+    auto ip_type = net::from_address(address);
+
+    if (ip_type != net::PC) {
+      std::ostringstream msg_stream;
+      msg_stream << "Access denied when getting performance snapshot. Only localhost requests are allowed. Client IP: " << client_address.to_string();
+      BOOST_LOG(warning) << msg_stream.str();
+
+      json error_json;
+      error_json["success"] = false;
+      error_json["status_code"] = 403;
+      error_json["status_message"] = msg_stream.str();
+
+      response->write(error_json.dump());
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    try {
+      response->write(perf::current_snapshot_json().dump());
+      response->close_connection_after_response = true;
+    }
+    catch (const std::exception &e) {
+      BOOST_LOG(error) << "getPerfCurrent: " << e.what();
+
+      json error_json;
+      error_json["success"] = false;
+      error_json["status_code"] = 500;
+      error_json["status_message"] = std::string(e.what());
+
+      response->write(error_json.dump());
+      response->close_connection_after_response = true;
+    }
+  }
+
+  void
   changeRuntimeBitrate(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
 
@@ -3191,6 +3234,7 @@ namespace confighttp {
     server.resource["^/api/apps/test-menu-cmd$"]["POST"] = testMenuCmd;
     server.resource["^/api/runtime/sessions$"]["GET"] = getRuntimeSessions;
     server.resource["^/api/runtime/bitrate$"]["GET"] = changeRuntimeBitrate;
+    server.resource["^/api/perf/current$"]["GET"] = getPerfCurrent;
     server.resource["^/steam-api/.+$"]["GET"] = proxySteamApi;
     server.resource["^/steam-store/.+$"]["GET"] = proxySteamStore;
     server.resource["^/api/ai/config$"]["GET"] = getAiConfig;
