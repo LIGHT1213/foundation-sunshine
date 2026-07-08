@@ -5,6 +5,8 @@ list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
         ${CURL_LIBRARIES})
 
 # add install prefix to assets path if not already there
-if(NOT SUNSHINE_ASSETS_DIR MATCHES "^${CMAKE_INSTALL_PREFIX}")
+# (skip if the user gave an absolute path — e.g. a dev build pointing at
+#  the build tree's assets/)
+if(NOT IS_ABSOLUTE "${SUNSHINE_ASSETS_DIR}")
     set(SUNSHINE_ASSETS_DIR "${CMAKE_INSTALL_PREFIX}/${SUNSHINE_ASSETS_DIR}")
 endif()
