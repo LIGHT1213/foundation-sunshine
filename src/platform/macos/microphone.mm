@@ -1,9 +1,10 @@
 /**
  * @file src/platform/macos/microphone.mm
- * @brief Definitions for microphone capture on macOS.
+ * @brief Definitions for audio capture on macOS.
  */
 #include "src/platform/common.h"
 #include "src/platform/macos/av_audio.h"
+#include "src/platform/macos/sck_audio.h"
 
 #include "src/config.h"
 #include "src/logging.h"
@@ -53,6 +54,22 @@ namespace platf {
 
     std::unique_ptr<mic_t>
     microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, bool continuous_audio) override {
+      // The platf::audio_control_t::microphone() contract on Sunshine is
+      // "capture the audio to stream TO the client" (i.e. system playback,
+      // the equivalent of WASAPI loopback on Windows / PulseAudio monitor on
+      // Linux). On macOS that is system audio, captured via ScreenCaptureKit
+      // (macOS 13.0+). The legacy AVFoundation path below only captures the
+      // microphone input device, which is the wrong thing for streaming game
+      // audio — it is kept only as a last-resort fallback.
+      (void) mapping;
+      (void) continuous_audio;
+
+      auto sck = make_sck_system_audio(channels, sample_rate, frame_size);
+      if (sck) {
+        return sck;
+      }
+      BOOST_LOG(warning) << "SCK system audio unavailable; falling back to AVAudio microphone capture (will stream mic, not game audio)."sv;
+
       auto mic = std::make_unique<av_mic_t>();
       const char *audio_sink = "";
 
