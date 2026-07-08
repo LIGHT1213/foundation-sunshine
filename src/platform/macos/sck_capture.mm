@@ -10,6 +10,7 @@
 #import "src/platform/macos/sck_capture.h"
 
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
+#import <CoreGraphics/CoreGraphics.h>  // CGPreflightScreenCaptureAccess
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
 #import <AppKit/AppKit.h>
@@ -150,6 +151,21 @@ namespace platf {
 
   bool
   sck_display_t::init(CGDirectDisplayID display_id, int frame_rate) {
+    // Preflight screen-capture TCC permission BEFORE touching ScreenCaptureKit.
+    // On macOS 14+/26 (Tahoe) the SCShareableContent async enumeration can
+    // crash the process (segfault inside the framework) when the calling app
+    // lacks the Screen Recording permission — the completionHandler is invoked
+    // on a tearing-down context. CGPreflightScreenCaptureAccess() (10.15+) lets
+    // us detect the missing permission synchronously and bail out cleanly so
+    // the caller falls back to AVFoundation instead of segfaulting.
+    if (!CGPreflightScreenCaptureAccess()) {
+      BOOST_LOG(warning) << "ScreenCaptureKit: no screen-capture permission; "
+                         << "grant 'Screen Recording' to the host app in System "
+                         << "Settings → Privacy & Security. Falling back to "
+                         << "AVFoundation capture."sv;
+      return false;
+    }
+
     // Enumerate shareable content (async) and find the SCDisplay matching
     // the requested CGDirectDisplayID. Block on a semaphore during setup.
     __block SCDisplay *matchedDisplay = nil;
