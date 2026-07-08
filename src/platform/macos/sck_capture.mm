@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <dispatch/dispatch.h>
+#include <objc/message.h>  // objc_msgSend_fpret (CGFloat scalar return)
 
 namespace fs = std::filesystem;
 
@@ -285,20 +286,39 @@ namespace platf {
         NSNumber *num = screen.deviceDescription[@"NSScreenNumber"];
         if (num.unsignedIntValue != display_id) continue;
 
+        // maximumPotentialExtendedDynamicRangeColorValue (macOS 14+) returns the
+        // panel's peak EDR color value (CGFloat, 1.0 = SDR, >1.0 = HDR). This
+        // property is NOT declared in older SDK headers, so we cannot call it as
+        // a typed property — the compiler treats the unknown selector as
+        // returning `id` and emits a warning, and at runtime the CGFloat return
+        // value gets misinterpreted as an ObjC object pointer, crashing inside
+        // objc_msgSend/objc_retain.
+        //
+        // Resolve the selector at runtime via objc_msgSend with the correct
+        // scalar return convention (CGFloat = double on arm64), guarded by
+        // respondsToSelector: so older macOS that lacks the selector is safe.
         if (@available(macOS 14.0, *)) {
-          // maximumPotentialExtendedDynamicRangeColorValue is the panel's peak
-          // EDR value (1.0 = SDR). > 1.0 means HDR-capable. It returns an
-          // NSNumber, so use floatValue.
-          NSNumber *peakNum = [screen maximumPotentialExtendedDynamicRangeColorValue];
-          float peak = peakNum ? peakNum.floatValue : 0.0f;
-          if (peak > 1.0f) {
-            hdrCapable_ = true;
-            // EDR peak → nits: Apple does not expose absolute nits directly,
-            // but a value of 2.0 typically maps to ~1000 nits, 4.0 to ~1600.
-            // Use a conservative fixed mapping until a real luminance API ships.
-            hdrPeakLuminance_ = std::max(1000.0f, peak * 500.0f);
-            BOOST_LOG(info) << "ScreenCaptureKit: HDR display detected, peak EDR="sv
-                            << peak << " (~"sv << hdrPeakLuminance_ << " nits)"sv;
+          SEL edrSel = NSSelectorFromString(@"maximumPotentialExtendedDynamicRangeColorValue");
+          if ([screen respondsToSelector:edrSel]) {
+            // Call via the ObjC runtime with the correct scalar return type.
+            // On arm64, CGFloat (double) returns go through plain objc_msgSend;
+            // on x86_64 the fp-return variant objc_msgSend_fpret is required.
+            // Cast objc_msgSend to a typed function pointer so the compiler
+            // uses the right ABI for the CGFloat return value.
+#if defined(__x86_64__)
+            CGFloat peak = ((CGFloat(*)(id, SEL))objc_msgSend_fpret)(screen, edrSel);
+#else
+            CGFloat peak = ((CGFloat(*)(id, SEL))objc_msgSend)(screen, edrSel);
+#endif
+            if (peak > 1.0) {
+              hdrCapable_ = true;
+              // EDR peak → nits: Apple does not expose absolute nits directly,
+              // but a value of 2.0 typically maps to ~1000 nits, 4.0 to ~1600.
+              // Use a conservative fixed mapping until a real luminance API ships.
+              hdrPeakLuminance_ = std::max(1000.0f, (float) peak * 500.0f);
+              BOOST_LOG(info) << "ScreenCaptureKit: HDR display detected, peak EDR="sv
+                              << peak << " (~"sv << hdrPeakLuminance_ << " nits)"sv;
+            }
           }
         }
         break;
