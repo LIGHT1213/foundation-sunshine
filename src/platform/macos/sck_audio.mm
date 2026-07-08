@@ -102,12 +102,14 @@ namespace platf {
   public:
     sck_system_audio_t() = default;
     ~sck_system_audio_t() override {
+      // MRC: __strong ivars are no-ops, so release explicitly.
       if (stream_) {
         [stream_ stopCaptureWithCompletionHandler:^(NSError * _Nullable) {}];
+        [stream_ release];
         stream_ = nil;
       }
-      delegate_ = nil;
-      queue_ = nil;
+      if (delegate_) { [delegate_ release]; delegate_ = nil; }
+      if (queue_) { dispatch_release(queue_); queue_ = nil; }
       TPCircularBufferCleanup(&buf_);
     }
 
@@ -191,6 +193,9 @@ namespace platf {
     delegate_ = [[SCKAudioDelegate alloc] init];
 
     stream_ = [[SCStream alloc] initWithFilter:filter configuration:cfg delegate:delegate_];
+    // SCStream retains filter/cfg/delegate; release our +1 from alloc.
+    [filter release];
+    [cfg release];
 
     NSError *addErr = nil;
     BOOL added = [stream_ addStreamOutput:delegate_

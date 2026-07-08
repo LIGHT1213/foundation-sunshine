@@ -230,31 +230,23 @@ namespace platf {
     }
     BOOST_LOG(info) << "Configuring selected display ("sv << requested_id << ") to stream"sv;
 
-    // Prefer ScreenCaptureKit (macOS 12.3+): high frame rate, per-display,
-    // and does not crash on missing permission. Fall back to the legacy
-    // AVFoundation capture when SCK is unavailable or the stream setup fails.
+    // ScreenCaptureKit (macOS 12.3+) is the only supported capture backend on
+    // this fork. The legacy AVFoundation path (AVCaptureScreenInput) is
+    // deprecated and on macOS 14+/26 it (a) cannot produce frames without a
+    // fully-granted TCC context, and (b) crashes inside NSConcreteMapTable
+    // dealloc when the AVVideo object is torn down after a failed/stalled
+    // capture. Falling back to it turned every "SCK unavailable" case into a
+    // segfault, so we no longer do — surface the failure instead and let the
+    // Web UI come up so the user can fix permissions.
     auto sck_disp = make_sck_display(requested_id, config.framerate);
     if (sck_disp) {
       return sck_disp;
     }
-    BOOST_LOG(warning) << "ScreenCaptureKit unavailable; falling back to AVFoundation capture (60fps cap, no HDR)."sv;
-
-    auto display = std::make_shared<av_display_t>();
-    display->display_id = requested_id;
-    display->av_capture = [[AVVideo alloc] initWithDisplay:display->display_id frameRate:config.framerate];
-
-    if (!display->av_capture) {
-      BOOST_LOG(error) << "Video setup failed."sv;
-      return nullptr;
-    }
-
-    display->width = display->av_capture.frameWidth;
-    display->height = display->av_capture.frameHeight;
-    // We also need set env_width and env_height for absolute mouse coordinates
-    display->env_width = display->width;
-    display->env_height = display->height;
-
-    return display;
+    BOOST_LOG(error) << "ScreenCaptureKit unavailable. Ensure 'Screen Recording' "
+                     << "permission is granted to this app and that you are on "
+                     << "macOS 12.3+. The legacy AVFoundation backend is not "
+                     << "used (it crashes on modern macOS)."sv;
+    return nullptr;
   }
 
   std::vector<std::string>

@@ -251,6 +251,8 @@ namespace platf {
     delegate_ = [[SCKStreamDelegate alloc] init];
 
     stream_ = [[SCStream alloc] initWithFilter:filter configuration:cfg_ delegate:delegate_];
+    // SCStream retains filter/cfg/delegate; release our +1 from alloc.
+    [filter release];
 
     NSError *addErr = nil;
     BOOL added = [stream_ addStreamOutput:delegate_
@@ -501,14 +503,22 @@ namespace platf {
 
   void
   sck_display_t::stop() {
+    // This file compiles under MRC (no -fobjc-arc), so __strong ivars are
+    // no-ops and assignment to nil does NOT release. Release explicitly.
     if (stream_) {
+      // Best-effort stop; ignore errors (stream may not have started).
       [stream_ stopCaptureWithCompletionHandler:^(NSError * _Nullable) {
       }];
+      [stream_ release];
       stream_ = nil;
     }
-    cfg_ = nil;
-    delegate_ = nil;
-    sampleQueue_ = nil;
+    if (cfg_) { [cfg_ release]; cfg_ = nil; }
+    if (delegate_) { [delegate_ release]; delegate_ = nil; }
+    if (sampleQueue_) {
+      // dispatch_queue_t is a CF/object hybrid; release via dispatch_release.
+      dispatch_release(sampleQueue_);
+      sampleQueue_ = nil;
+    }
   }
 
   std::shared_ptr<display_t>
