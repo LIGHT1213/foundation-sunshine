@@ -13,6 +13,7 @@
 
 #import <Metal/Metal.h>
 #import <AppKit/AppKit.h>
+#import <CoreGraphics/CoreGraphics.h>  // CGPreflightScreenCaptureAccess
 
 // Avoid conflict between AVFoundation and libavutil both defining AVMediaType
 #define AVMediaType AVMediaType_FFmpeg
@@ -71,8 +72,13 @@ namespace platf {
         return true;
       }];
 
-      // FIXME: We should time out if an image isn't returned for a while
-      dispatch_semaphore_wait(signal, DISPATCH_TIME_FOREVER);
+      // Time out if no frame arrives (e.g. permission revoked mid-stream or
+      // display goes idle). Returning timeout lets the caller fail gracefully
+      // instead of hanging forever on DISPATCH_TIME_FOREVER.
+      if (dispatch_semaphore_wait(signal, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+        BOOST_LOG(error) << "Timed out waiting for capture frame (screen-capture permission or display issue)."sv;
+        return capture_e::timeout;
+      }
 
       return capture_e::ok;
     }
@@ -130,7 +136,11 @@ namespace platf {
         return false;
       }];
 
-      dispatch_semaphore_wait(signal, DISPATCH_TIME_FOREVER);
+      // Same 3s timeout as capture() — see comment there.
+      if (dispatch_semaphore_wait(signal, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+        BOOST_LOG(error) << "Timed out waiting for dummy capture frame."sv;
+        return -1;
+      }
 
       return 0;
     }
@@ -191,6 +201,19 @@ namespace platf {
   display(platf::mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
     if (hwdevice_type != platf::mem_type_e::system && hwdevice_type != platf::mem_type_e::videotoolbox) {
       BOOST_LOG(error) << "Could not initialize display with the given hw device type."sv;
+      return nullptr;
+    }
+
+    // Preflight the Screen Recording TCC permission before creating ANY capture
+    // backend. Without it, ScreenCaptureKit's async enumeration can crash and
+    // AVFoundation's capture callback never fires, so dummy_img()/capture()
+    // block forever on DISPATCH_TIME_FOREVER — hanging encoder probe and
+    // preventing the HTTP server from starting. Bail out here so the encoder
+    // probe fails fast and the Web UI still comes up to show the error.
+    if (!CGPreflightScreenCaptureAccess()) {
+      BOOST_LOG(error) << "Screen capture permission denied. Grant 'Screen "
+                       << "Recording' to this app in System Settings → Privacy "
+                       << "& Security, then restart Sunshine."sv;
       return nullptr;
     }
 
