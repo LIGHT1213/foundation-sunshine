@@ -67,6 +67,12 @@
 - (int)setupMicrophone:(AVCaptureDevice *)device sampleRate:(UInt32)sampleRate frameSize:(UInt32)frameSize channels:(UInt8)channels {
   self.audioCaptureSession = [[AVCaptureSession alloc] init];
 
+  // Initialize the signal + ring buffer BEFORE startRunning so the capture
+  // callback (which can fire immediately after startRunning) never touches
+  // uninitialized memory.
+  self.samplesArrivedSignal = [[NSCondition alloc] init];
+  TPCircularBufferInit(&self->audioSampleBuffer, kBufferLength * channels);
+
   NSError *error;
   AVCaptureDeviceInput *audioInput = [AVCaptureDeviceInput deviceInputWithDevice:device error:&error];
   if (audioInput == nil) {
@@ -77,7 +83,8 @@
     [self.audioCaptureSession addInput:audioInput];
   }
   else {
-    [audioInput dealloc];
+    // Never call -dealloc directly; use -release so the dealloc chain runs.
+    [audioInput release];
     return -1;
   }
 
@@ -105,6 +112,9 @@
   else {
     [audioInput release];
     [audioOutput release];
+    // Release the session we alloc'd above so this failure path doesn't leak.
+    [self.audioCaptureSession release];
+    self.audioCaptureSession = nil;
     return -1;
   }
 
@@ -115,8 +125,6 @@
   [audioInput release];
   [audioOutput release];
 
-  self.samplesArrivedSignal = [[NSCondition alloc] init];
-  TPCircularBufferInit(&self->audioSampleBuffer, kBufferLength * channels);
 
   return 0;
 }

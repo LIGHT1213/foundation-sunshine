@@ -306,6 +306,11 @@ const KeyCodeMap kKeyCodesMap[] = {
     // Creating a new event every time to avoid any reuse risk
     const auto macos_input = static_cast<macos_input_t *>(input.get());
     const auto snapshot_event = CGEventCreate(macos_input->source);
+    // CGEventCreate can return NULL (HID unavailable) — CGEventGetLocation and
+    // CFRelease on NULL both crash.
+    if (!snapshot_event) {
+      return util::point_t { 0, 0 };
+    }
     const auto current = CGEventGetLocation(snapshot_event);
     CFRelease(snapshot_event);
     return util::point_t {
@@ -449,6 +454,9 @@ const KeyCodeMap kKeyCodesMap[] = {
       nullptr,
       kCGScrollEventUnitLine,
       2, high_res_distance > 0 ? 1 : -1, high_res_distance);
+    // CGEventCreateScrollWheelEvent can return NULL under HID pressure;
+    // CGEventPost/CFRelease on NULL both crash.
+    if (!upEvent) return;
     CGEventPost(kCGHIDEventTap, upEvent);
     CFRelease(upEvent);
   }
@@ -561,8 +569,20 @@ const KeyCodeMap kKeyCodesMap[] = {
 
     // Input coordinates are based on the virtual resolution not the physical, so we need the scaling factor
     const CGDisplayModeRef mode = CGDisplayCopyDisplayMode(macos_input->display);
-    macos_input->displayScaling = ((CGFloat) CGDisplayPixelsWide(macos_input->display)) / ((CGFloat) CGDisplayModeGetPixelWidth(mode));
-    CFRelease(mode);
+    if (!mode) {
+      // Invalid/offline display id (e.g. user set a bogus output_name). Avoid
+      // division by zero / CFRelease(NULL); fall back to 1.0 scaling.
+      BOOST_LOG(warning) << "input: could not query display mode for id "sv
+                         << macos_input->display << "; assuming 1.0 scaling."sv;
+      macos_input->displayScaling = 1.0;
+    }
+    else {
+      const int pixelW = CGDisplayModeGetPixelWidth(mode);
+      macos_input->displayScaling = pixelW > 0
+        ? ((CGFloat) CGDisplayPixelsWide(macos_input->display)) / ((CGFloat) pixelW)
+        : 1.0;
+      CFRelease(mode);
+    }
 
     macos_input->source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
 
@@ -573,6 +593,19 @@ const KeyCodeMap kKeyCodesMap[] = {
     macos_input->mouse_down[0] = false;
     macos_input->mouse_down[1] = false;
     macos_input->mouse_down[2] = false;
+
+    // CGEventSourceCreate / CGEventCreate return NULL when the HID system is
+    // unavailable (memory pressure, early boot, sandbox). A half-built context
+    // here would crash on the first keystroke/mouse-move (CGEventSetType /
+    // CGEventPost / CFRelease on NULL). Bail out cleanly instead — the caller
+    // treats a null/empty input as "no input" and the stream still works.
+    if (!macos_input->source || !macos_input->kb_event || !macos_input->mouse_event) {
+      BOOST_LOG(error) << "input: failed to create CGEvent source/events (HID "
+                       << "system unavailable). Input will be disabled."sv;
+      freeInput(result.get());
+      result.reset();
+      return result;
+    }
 
     BOOST_LOG(debug) << "Display "sv << macos_input->display << ", pixel dimension: " << CGDisplayPixelsWide(macos_input->display) << "x"sv << CGDisplayPixelsHigh(macos_input->display);
 

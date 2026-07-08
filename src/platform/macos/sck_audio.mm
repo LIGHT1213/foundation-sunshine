@@ -62,6 +62,7 @@ API_AVAILABLE(macos(13.0))
 
 - (void)dealloc {
   if (pendingSample_) CFRelease(pendingSample_);
+  if (frameSignal_) { dispatch_release(frameSignal_); frameSignal_ = nil; }
   [super dealloc];
 }
 
@@ -102,9 +103,19 @@ namespace platf {
   public:
     sck_system_audio_t() = default;
     ~sck_system_audio_t() override {
-      // MRC: __strong ivars are no-ops, so release explicitly.
+      // MRC: __strong ivars are no-ops, so release explicitly. Mirror the
+      // sck_display_t::stop() drain pattern: wait for stopCapture, drain the
+      // serial callback queue, THEN release the delegate (SCStream does NOT
+      // retain its delegate, so freeing it while a callback is in-flight on
+      // queue_ is a use-after-free).
       if (stream_) {
-        [stream_ stopCaptureWithCompletionHandler:^(NSError * _Nullable) {}];
+        dispatch_semaphore_t stopSem = dispatch_semaphore_create(0);
+        [stream_ stopCaptureWithCompletionHandler:^(NSError * _Nullable) {
+          dispatch_semaphore_signal(stopSem);
+        }];
+        dispatch_semaphore_wait(stopSem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        [stopSem release];
+        if (queue_) { dispatch_sync(queue_, ^{}); }
         [stream_ release];
         stream_ = nil;
       }

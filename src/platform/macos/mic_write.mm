@@ -41,12 +41,19 @@ namespace platf::audio {
     std::atomic<bool> running {false};
 
     ~impl() {
-      running = false;
+      // Order matters: stop + uninitialize form a barrier that guarantees the
+      // realtime render callback is no longer in flight BEFORE we free the ring
+      // buffer. AudioOutputUnitStop alone does NOT guarantee the currently-
+      // running render has returned; AudioUnitUninitialize does. Without this
+      // ordering, the callback can read freed ring memory during teardown.
+      running.store(false, std::memory_order_release);
       if (au) {
         AudioOutputUnitStop(au);
+        AudioUnitUninitialize(au);  // barrier: no more render callbacks
         AudioComponentInstanceDispose(au);
         au = nullptr;
       }
+      // Now safe to free — no render callback can touch the ring.
       TPCircularBufferCleanup(&ring);
       if (decoder) {
         opus_decoder_destroy(decoder);

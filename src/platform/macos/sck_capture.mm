@@ -90,6 +90,14 @@ API_AVAILABLE(macos(12.3))
   return pendingSample_.exchange(NULL);
 }
 
+- (void)dealloc {
+  // MRC: the ivars are CF/dispatch objects (+1 from create) not tracked by ARC.
+  if (frameSignal_) { dispatch_release(frameSignal_); frameSignal_ = nil; }
+  CMSampleBufferRef leaked = pendingSample_.load();
+  if (leaked) CFRelease(leaked);
+  [super dealloc];
+}
+
 @end
 
 // ===== C++ display_t implementation =====
@@ -506,19 +514,30 @@ namespace platf {
     // This file compiles under MRC (no -fobjc-arc), so __strong ivars are
     // no-ops and assignment to nil does NOT release. Release explicitly.
     if (stream_) {
-      // Best-effort stop; ignore errors (stream may not have started).
+      // Synchronously wait for stopCapture to complete so SCK schedules no NEW
+      // callbacks. SCStream does NOT retain its delegate, so we must not free
+      // the delegate/callback state until all in-flight callbacks are done.
+      dispatch_semaphore_t stopSem = dispatch_semaphore_create(0);
       [stream_ stopCaptureWithCompletionHandler:^(NSError * _Nullable) {
+        dispatch_semaphore_signal(stopSem);
       }];
+      dispatch_semaphore_wait(stopSem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+      [stopSem release];
+
+      // Drain any callback already executing on the serial sample queue. We are
+      // on the capture/C++ thread, never on sampleQueue_, so this can't deadlock.
+      if (sampleQueue_) {
+        dispatch_sync(sampleQueue_, ^{});
+      }
+
       [stream_ release];
       stream_ = nil;
     }
+    // Order matters: delegate_ and sampleQueue_ may still be referenced by a
+    // callback drained above, so release them only AFTER the drain.
     if (cfg_) { [cfg_ release]; cfg_ = nil; }
     if (delegate_) { [delegate_ release]; delegate_ = nil; }
-    if (sampleQueue_) {
-      // dispatch_queue_t is a CF/object hybrid; release via dispatch_release.
-      dispatch_release(sampleQueue_);
-      sampleQueue_ = nil;
-    }
+    if (sampleQueue_) { dispatch_release(sampleQueue_); sampleQueue_ = nil; }
   }
 
   std::shared_ptr<display_t>
