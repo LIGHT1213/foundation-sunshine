@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for Sunshine on macOS.
+
+  This is the macOS equivalent of the Windows sunshinesvc service wrapper: it
+  auto-starts Sunshine at login and keeps it alive (KeepAlive + restart on
+  crash). Install per-user:
+
+      cp com.alkaidlab.sunshine.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.alkaidlab.sunshine.plist
+
+  Or system-wide (LaunchDaemon, runs as root — not recommended for Sunshine,
+  which needs the GUI session for screen capture) into /Library/LaunchDaemons/.
+
+  Adjust BINARY_PATH to the absolute path of your sunshine binary (e.g.
+  /usr/local/bin/sunshine or the build output under .../build/sunshine).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.alkaidlab.sunshine</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>BINARY_PATH</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- Restart delay after a crash (seconds). -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Sunshine needs the GUI session (screen capture, audio) so run it as a
+         LaunchAgent (user session), not a LaunchDaemon. -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/sunshine-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/sunshine-launchd.log</string>
+</dict>
+</plist>

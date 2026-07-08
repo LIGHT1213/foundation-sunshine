@@ -54,6 +54,41 @@ Notable CMake options (`-D…=ON/OFF`): `BUILD_TESTS`, `BUILD_DOCS`, `BUILD_WERR
 `SUNSHINE_ENABLE_TRAY` (off on macOS), `SUNSHINE_REQUIRE_TRAY`, `BUILD_WERROR`, plus Linux
 capture toggles `SUNSHINE_ENABLE_{CUDA,DRM,VAAPI,WAYLAND,X11}`.
 
+### macOS (Apple Silicon) build
+
+Verified working on macOS arm64. Dependencies via Homebrew:
+
+```bash
+brew install cmake ninja boost icu4c miniupnpc opus pkg-config
+# OpenSSL header symlink (Apple Silicon):
+ln -sf /opt/homebrew/opt/openssl/include/openssl /opt/homebrew/include/openssl
+```
+
+Then:
+
+```bash
+cmake -B build -G Ninja -S . -DBUILD_TESTS=OFF -DBUILD_DOCS=OFF
+ninja -C build
+./build/sunshine help   # smoke test
+```
+
+Notes specific to this fork's macOS build:
+- **Boost version**: Homebrew ships Boost 1.90; `cmake/dependencies/Boost_Sunshine.cmake`
+  accepts 1.90 on Apple (vs the upstream 1.91 pin) to avoid a multi-hour FetchContent
+  source build. Windows/Linux keep the 1.91 pin.
+- **build-deps submodule**: `third-party/build-deps` (the FFmpeg static-lib repo) is large;
+  a full clone is slow. A partial clone + sparse checkout of only `dist/Darwin-arm64`
+  works: clone with `--filter=blob:none`, then
+  `git sparse-checkout set dist/Darwin-arm64 && git checkout dist`.
+- **Submodule checkout glitches**: shallow `submodule update --depth=1` has left several
+  third-party/* working trees empty after checkout. If a `third-party/*` dir is empty,
+  `cd` into it and run `git fetch origin <branch> && git checkout FETCH_HEAD` to repair
+  (notably `moonlight-common-c` must be on the fork's `mic` branch for touchpad packet
+  types, `nanors`/`TPCircularBuffer` need explicit checkout).
+- **First launch**: grant Screen Recording (and Microphone) permission in System Settings
+  → Privacy & Security. Without it, ScreenCaptureKit fails cleanly and the legacy
+  AVFoundation path is used as a fallback.
+
 Submodules are required: clone with `--recurse-submodules`, or run
 `git submodule update --init --recursive`. AMF is consumed headers-only via sparse-checkout
 (see notes in `.gitmodules`).
