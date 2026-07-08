@@ -62,6 +62,7 @@ API_AVAILABLE(macos(13.0))
 
 - (void)dealloc {
   if (pendingSample_) CFRelease(pendingSample_);
+  [super dealloc];
 }
 
 - (void)stream:(SCStream *)stream
@@ -141,7 +142,8 @@ namespace platf {
     }
 
     // Pick the primary display as the audio source (SCK ties system audio to a
-    // display filter).
+    // display filter). Same zombie-SCDisplay / TCC-permission caveats as the
+    // video path in sck_capture.mm apply here — validate the frame before use.
     __block SCDisplay *matchedDisplay = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     [SCShareableContent getShareableContentExcludingDesktopWindows:NO
@@ -156,8 +158,20 @@ namespace platf {
       }
       dispatch_semaphore_signal(sem);
     }];
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    // 3s timeout — without TCC permission the completionHandler may never fire
+    // (or fires on a tearing-down context), so FOREVER would deadlock init().
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+      BOOST_LOG(error) << "SCK audio: timed out enumerating shareable content (permission missing?)."sv;
+      return false;
+    }
     if (!matchedDisplay) {
+      return false;
+    }
+    // Zombie guard: an invalid SCDisplay has a zero-sized frame, and passing
+    // it to SCContentFilter crashes inside objc_retain (see sck_capture.mm).
+    CGRect frame = matchedDisplay.frame;
+    if (CGRectIsEmpty(frame) || CGRectGetWidth(frame) <= 0 || CGRectGetHeight(frame) <= 0) {
+      BOOST_LOG(error) << "SCK audio: display returned invalid frame (permission missing or stale)."sv;
       return false;
     }
 
@@ -192,7 +206,11 @@ namespace platf {
       startErr = err;
       dispatch_semaphore_signal(startSem);
     }];
-    dispatch_semaphore_wait(startSem, DISPATCH_TIME_FOREVER);
+    // 5s timeout for stream start (capture backend init can be slow on first grant).
+    if (dispatch_semaphore_wait(startSem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+      BOOST_LOG(error) << "SCK audio: startCapture timed out."sv;
+      return false;
+    }
 
     if (startErr) {
       const char *m = startErr.localizedDescription.UTF8String;
@@ -262,8 +280,15 @@ namespace platf {
       uint32_t length = 0;
       void *tail = TPCircularBufferTail(&buf_, &length);
       if (!tail || length == 0) {
-        // Nothing buffered: block until the next SCK audio frame arrives.
-        dispatch_semaphore_wait(delegate_->frameSignal_, DISPATCH_TIME_FOREVER);
+        // Nothing buffered: wait briefly for the next SCK audio frame. A bounded
+        // timeout (3s) ensures sample() can't hang forever if the stream stops
+        // or permission is revoked mid-session; we surface a timeout so the
+        // caller can restart rather than deadlock.
+        if (dispatch_semaphore_wait(delegate_->frameSignal_,
+              dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+          BOOST_LOG(warning) << "SCK audio: timed out waiting for audio frame."sv;
+          return capture_e::timeout;
+        }
         continue;
       }
 

@@ -192,7 +192,12 @@ namespace platf {
       }
       dispatch_semaphore_signal(sem);
     }];
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    // 3s timeout: without TCC permission the completionHandler can be invoked
+    // on a tearing-down context and crash, or never fire — FOREVER would hang.
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+      BOOST_LOG(error) << "ScreenCaptureKit: timed out enumerating shareable content."sv;
+      return false;
+    }
 
     if (!matchedDisplay) {
       BOOST_LOG(error) << "ScreenCaptureKit: no matching display found for id "sv << display_id;
@@ -260,7 +265,12 @@ namespace platf {
       startErr = err;
       dispatch_semaphore_signal(startSem);
     }];
-    dispatch_semaphore_wait(startSem, DISPATCH_TIME_FOREVER);
+    // 5s timeout: capture backend init can be slow on first TCC grant, but a
+    // missing-permission / framework hang must not deadlock encoder probe.
+    if (dispatch_semaphore_wait(startSem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+      BOOST_LOG(error) << "ScreenCaptureKit: startCapture timed out."sv;
+      return false;
+    }
 
     if (startErr) {
       const char *m = startErr.localizedDescription.UTF8String;
@@ -369,7 +379,15 @@ namespace platf {
   capture_e
   sck_display_t::capture(const push_captured_image_cb_t &push_captured_image_cb,
     const pull_free_image_cb_t &pull_free_image_cb, bool * /*cursor*/) {
-    dispatch_semaphore_wait(delegate_->frameSignal_, DISPATCH_TIME_FOREVER);
+    // Wait for the next frame with a 10s timeout. Under normal streaming the
+    // frame signal fires ~60×/s; a 10s gap means the stream has stopped or the
+    // display went to sleep. Returning timeout lets the caller restart instead
+    // of hanging the capture thread forever on DISPATCH_TIME_FOREVER.
+    if (dispatch_semaphore_wait(delegate_->frameSignal_,
+          dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) {
+      BOOST_LOG(warning) << "ScreenCaptureKit: timed out waiting for capture frame."sv;
+      return capture_e::timeout;
+    }
 
     CMSampleBufferRef sample = [delegate_ consumeSample];
     if (!sample) {
@@ -441,7 +459,13 @@ namespace platf {
 
   int
   sck_display_t::dummy_img(img_t *img) {
-    dispatch_semaphore_wait(delegate_->frameSignal_, DISPATCH_TIME_FOREVER);
+    // Bounded 10s wait — same rationale as capture(). Without it, a missing
+    // permission or stopped stream deadlocks encoder probe.
+    if (dispatch_semaphore_wait(delegate_->frameSignal_,
+          dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) {
+      BOOST_LOG(error) << "ScreenCaptureKit: timed out waiting for dummy capture frame."sv;
+      return -1;
+    }
     CMSampleBufferRef sample = [delegate_ consumeSample];
     if (!sample) {
       return -1;

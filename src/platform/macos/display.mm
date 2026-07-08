@@ -288,12 +288,14 @@ namespace platf {
     @autoreleasepool {
       NSArray<id<MTLDevice>> *devices = MTLCopyAllDevices();
       for (id<MTLDevice> device in devices) {
-        names.emplace_back(device.name.UTF8String);
+        NSString *n = device.name;
+        if (n) names.emplace_back(n.UTF8String);
       }
       if (names.empty()) {
         id<MTLDevice> default_device = MTLCreateSystemDefaultDevice();
         if (default_device) {
-          names.emplace_back(default_device.name.UTF8String);
+          NSString *n = default_device.name;
+          if (n) names.emplace_back(n.UTF8String);
         }
       }
     }
