@@ -20,6 +20,7 @@ endif()
 list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
         ${APP_KIT_LIBRARY}
         ${APP_SERVICES_LIBRARY}
+        ${AUDIO_TOOLBOX_LIBRARY}
         ${AV_FOUNDATION_LIBRARY}
         ${CORE_MEDIA_LIBRARY}
         ${CORE_VIDEO_LIBRARY}
@@ -45,6 +46,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/macos/gamepad.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/microphone.mm"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/mic_write.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/mic_write.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/misc.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/misc.h"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/nv12_zero_device.cpp"

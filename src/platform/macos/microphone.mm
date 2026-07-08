@@ -4,10 +4,13 @@
  */
 #include "src/platform/common.h"
 #include "src/platform/macos/av_audio.h"
+#include "src/platform/macos/mic_write.h"
 #include "src/platform/macos/sck_audio.h"
 
 #include "src/config.h"
 #include "src/logging.h"
+
+#include <memory>
 
 namespace platf {
   using namespace std::literals;
@@ -113,23 +116,37 @@ namespace platf {
 
     int
     write_mic_data(const char *data, size_t size, uint16_t seq = 0) override {
-      // Microphone redirect to the host is not implemented on macOS yet.
-      (void) data;
-      (void) size;
-      (void) seq;
-      return -1;
+      // Render client microphone audio to the host's default output device.
+      // NOTE: this is "voice intercom" only — macOS has no public API to
+      // create a virtual input device that games would pick up as a local mic.
+      // See src/platform/macos/mic_write.h for details.
+      if (!mic_redirect) {
+        return -1;
+      }
+      return mic_redirect->write_data(data, size, seq);
     }
 
     int
     init_mic_redirect_device() override {
-      // No host-side virtual mic on macOS.
-      return -1;
+      // Lazily create the Core Audio render session on first use.
+      if (mic_redirect) {
+        return 0;  // already initialized
+      }
+      mic_redirect = std::make_unique<platf::audio::mic_write_coreaudio_t>();
+      if (mic_redirect->init() != 0) {
+        mic_redirect.reset();
+        return -1;
+      }
+      return 0;
     }
 
     void
     release_mic_redirect_device() override {
-      // Nothing to release.
+      mic_redirect.reset();
     }
+
+  private:
+    std::unique_ptr<platf::audio::mic_write_coreaudio_t> mic_redirect;
   };
 
   std::unique_ptr<audio_control_t>
