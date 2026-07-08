@@ -12,6 +12,7 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
+#import <AppKit/AppKit.h>
 
 #include "src/platform/macos/av_img_t.h"
 #include "src/platform/macos/nv12_zero_device.h"
@@ -119,9 +120,21 @@ namespace platf {
     int
     dummy_img(img_t *img) override;
 
+    // HDR overrides (default display_t implementations return false).
+    bool
+    is_hdr() override;
+
+    bool
+    get_hdr_metadata(SS_HDR_METADATA &metadata) override;
+
   private:
     void
     stop();
+
+    // Probe HDR capability of the NSScreen matching display_id; fills
+    // hdrCapable_ / hdrPeakLuminance_.
+    void
+    probe_hdr(CGDirectDisplayID display_id);
 
     int width_ {0};
     int height_ {0};
@@ -130,6 +143,9 @@ namespace platf {
     SCStreamConfiguration *cfg_ __strong {nil};
     SCKStreamDelegate *delegate_ __strong {nil};
     dispatch_queue_t sampleQueue_ __strong {nil};
+    // HDR state (populated in init()).
+    bool hdrCapable_ {false};
+    float hdrPeakLuminance_ {1000.0f};  // nits, conservative default
   };
 
   bool
@@ -225,6 +241,80 @@ namespace platf {
 
     BOOST_LOG(info) << "ScreenCaptureKit: capturing display "sv << display_id
                     << " at "sv << width_ << "x"sv << height_;
+
+    // Probe HDR capability of the matching NSScreen (macOS 14+ exposes EDR
+    // peak luminance). We report HDR when the display advertises a peak EDR
+    // color value > 1.0. On older macOS or non-HDR panels this stays false.
+    probe_hdr(display_id);
+
+    return true;
+  }
+
+  void
+  sck_display_t::probe_hdr(CGDirectDisplayID display_id) {
+    @autoreleasepool {
+      for (NSScreen *screen in [NSScreen screens]) {
+        NSNumber *num = screen.deviceDescription[@"NSScreenNumber"];
+        if (num.unsignedIntValue != display_id) continue;
+
+        if (@available(macOS 14.0, *)) {
+          // maximumPotentialExtendedDynamicRangeColorValue is the panel's peak
+          // EDR value (1.0 = SDR). > 1.0 means HDR-capable. It returns an
+          // NSNumber, so use floatValue.
+          NSNumber *peakNum = [screen maximumPotentialExtendedDynamicRangeColorValue];
+          float peak = peakNum ? peakNum.floatValue : 0.0f;
+          if (peak > 1.0f) {
+            hdrCapable_ = true;
+            // EDR peak → nits: Apple does not expose absolute nits directly,
+            // but a value of 2.0 typically maps to ~1000 nits, 4.0 to ~1600.
+            // Use a conservative fixed mapping until a real luminance API ships.
+            hdrPeakLuminance_ = std::max(1000.0f, peak * 500.0f);
+            BOOST_LOG(info) << "ScreenCaptureKit: HDR display detected, peak EDR="sv
+                            << peak << " (~"sv << hdrPeakLuminance_ << " nits)"sv;
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  bool
+  sck_display_t::is_hdr() {
+    return hdrCapable_;
+  }
+
+  bool
+  sck_display_t::get_hdr_metadata(SS_HDR_METADATA &metadata) {
+    if (!hdrCapable_) {
+      return false;
+    }
+
+    // BT.2020 + PQ (SMPTE ST 2084) static mastering metadata. Primaries are
+    // the standard BT.2020 chromaticities (normalized to 50000). The luminance
+    // fields use the probed peak (falling back to a safe 1000 nits default).
+    std::memset(&metadata, 0, sizeof(metadata));
+
+    // BT.2020 primaries (x,y normalized to 50000).
+    metadata.displayPrimaries[0].x = 15600;  // Red   (0.708, 0.292)
+    metadata.displayPrimaries[0].y = 23000;
+    metadata.displayPrimaries[1].x = 7500;   // Green (0.170, 0.797)
+    metadata.displayPrimaries[1].y = 39850;
+    metadata.displayPrimaries[2].x = 15000;  // Blue  (0.131, 0.046)
+    metadata.displayPrimaries[2].y = 3000;
+    metadata.whitePoint.x = 15635;           // D65 (0.3127, 0.3290)
+    metadata.whitePoint.y = 16450;
+
+    metadata.maxDisplayLuminance = (uint16_t) hdrPeakLuminance_;
+    metadata.minDisplayLuminance = 1;        // 0.0001 nits
+
+    // Content light levels are populated per-frame by the dynamic-metadata
+    // path (hdr_luminance_stats); without GPU luminance analysis (the macOS
+    // equivalent of Windows' D3D11 compute shader) we leave them at 0 so the
+    // client falls back to display-static HDR10.
+    metadata.maxContentLightLevel = 0;
+    metadata.maxFrameAverageLightLevel = 0;
+    metadata.maxFullFrameLuminance = (uint16_t) hdrPeakLuminance_;
+
     return true;
   }
 
