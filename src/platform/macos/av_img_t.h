@@ -28,8 +28,13 @@ namespace platf {
 
     // Constructor
     explicit av_pixel_buf_t(CMSampleBufferRef sb):
-        buf(
-          CMSampleBufferGetImageBuffer(sb)) {
+        buf((CVPixelBufferRef) CFRetain(CMSampleBufferGetImageBuffer(sb))) {
+      // Retain the pixel buffer so its lifetime is INDEPENDENT of the sample
+      // buffer. CMSampleBufferGetImageBuffer follows the "Get" rule and returns
+      // an un-retained reference; without this retain, downstream code
+      // (nv12_zero_device::convert stores the CVPixelBufferRef in av_frame->
+      // data[3]) can outlive the av_img and access a freed pixel buffer,
+      // crashing inside CFRetain / VideoToolbox.
       CVPixelBufferLockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
     }
 
@@ -42,6 +47,7 @@ namespace platf {
     ~av_pixel_buf_t() {
       if (buf != nullptr) {
         CVPixelBufferUnlockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferRelease(buf);
       }
     }
   };
