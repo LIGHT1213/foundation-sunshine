@@ -297,21 +297,8 @@ const KeyCodeMap kKeyCodesMap[] = {
     BOOST_LOG(info) << "unicode: Unicode input not yet implemented for MacOS."sv;
   }
 
-  int
-  alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
-    BOOST_LOG(info) << "alloc_gamepad: Gamepad not yet implemented for MacOS."sv;
-    return -1;
-  }
-
-  void
-  free_gamepad(input_t &input, int nr) {
-    BOOST_LOG(info) << "free_gamepad: Gamepad not yet implemented for MacOS."sv;
-  }
-
-  void
-  gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state) {
-    BOOST_LOG(info) << "gamepad: Gamepad not yet implemented for MacOS."sv;
-  }
+  // alloc_gamepad / free_gamepad / gamepad_update are implemented in
+  // src/platform/macos/gamepad.mm (virtual gamepad via IOKit HID).
 
   // returns current mouse location:
   util::point_t
@@ -603,21 +590,6 @@ const KeyCodeMap kKeyCodesMap[] = {
     delete input;
   }
 
-  std::vector<supported_gamepad_t> &
-  supported_gamepads(input_t *input) {
-    static std::vector gamepads {
-      supported_gamepad_t { "", false, "gamepads.macos_not_implemented" }
-    };
-
-    return gamepads;
-  }
-
-  /**
-   * @brief Returns the supported platform capabilities to advertise to the client.
-   * @return Capability flags.
-   */
-  platform_caps::caps_t
-  get_capabilities() {
-    return 0;
-  }
+  // supported_gamepads() and get_capabilities() are implemented in
+  // src/platform/macos/gamepad.mm.
 }  // namespace platf

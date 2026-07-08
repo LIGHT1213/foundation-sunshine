@@ -24,6 +24,7 @@ list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
         ${CORE_MEDIA_LIBRARY}
         ${CORE_VIDEO_LIBRARY}
         ${FOUNDATION_LIBRARY}
+        ${IO_KIT_LIBRARY}
         ${METAL_LIBRARY}
         ${SCREEN_CAPTURE_KIT_LIBRARY}
         ${VIDEO_TOOLBOX_LIBRARY})
@@ -41,6 +42,7 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/macos/av_video.m"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/display.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/display_device.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/gamepad.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/microphone.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/misc.mm"
