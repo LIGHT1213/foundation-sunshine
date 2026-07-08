@@ -198,7 +198,19 @@ namespace platf {
       return false;
     }
 
+    // Defense against a macOS Tahoe (26.x) ScreenCaptureKit bug: when TCC
+    // permission is missing or stale (e.g. adhoc-signed binary whose CDHash
+    // changed after rebuild), SCShareableContent can hand back a non-nil but
+    // invalid (zombie) SCDisplay. Passing it to SCContentFilter crashes inside
+    // objc_retain. Validate the frame before use — a zombie returns a
+    // zero-sized rect, and a zero width/height is unusable anyway.
     CGRect bounds = matchedDisplay.frame;
+    if (CGRectIsEmpty(bounds) || CGRectGetWidth(bounds) <= 0 || CGRectGetHeight(bounds) <= 0) {
+      BOOST_LOG(error) << "ScreenCaptureKit: display "sv << display_id
+                       << " returned an invalid frame (permission missing or "
+                       << "stale). Falling back to AVFoundation."sv;
+      return false;
+    }
     width_ = (int) CGRectGetWidth(bounds);
     height_ = (int) CGRectGetHeight(bounds);
 
