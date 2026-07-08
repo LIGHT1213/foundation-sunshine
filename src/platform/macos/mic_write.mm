@@ -64,6 +64,14 @@ namespace platf::audio {
       UInt32 inNumberFrames,
       AudioBufferList *ioData) {
       auto *self = static_cast<impl *>(inRefCon);
+      // Teardown guard: once running goes false the destructor is tearing down
+      // the ring buffer; emit silence rather than reading freed memory.
+      if (!self->running.load(std::memory_order_acquire)) {
+        if (ioData && ioData->mNumberBuffers > 0) {
+          memset(ioData->mBuffers[0].mData, 0, ioData->mBuffers[0].mDataByteSize);
+        }
+        return noErr;
+      }
       if (!ioData || ioData->mNumberBuffers == 0) {
         return noErr;
       }
@@ -158,13 +166,16 @@ namespace platf::audio {
       return -1;
     }
 
+    // Set running=true BEFORE AudioOutputUnitStart so the render callback (which
+    // starts firing the moment we start) sees the flag as true.
+    p_->running = true;
     st = AudioOutputUnitStart(p_->au);
     if (st != noErr) {
+      p_->running = false;
       BOOST_LOG(error) << "mic_write: AudioOutputUnitStart failed: "sv << st;
       return -1;
     }
 
-    p_->running = true;
     BOOST_LOG(info) << "mic_write: client mic redirect to default output ("sv
                     << kMicSampleRate << "Hz mono)"sv;
     return 0;

@@ -182,12 +182,12 @@ namespace platf {
       else {
         for (SCDisplay *d in content.displays) {
           if (d.displayID == display_id) {
-            matchedDisplay = d;
+            matchedDisplay = [d retain];  // MRC: __block vars aren't retained
             break;
           }
         }
         if (!matchedDisplay && content.displays.count > 0) {
-          matchedDisplay = content.displays.firstObject;
+          matchedDisplay = [content.displays.firstObject retain];
         }
       }
       dispatch_semaphore_signal(sem);
@@ -228,6 +228,10 @@ namespace platf {
 
     SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:matchedDisplay
                                                       excludingWindows:@[]];
+    // matchedDisplay was retained in the completion handler (MRC: __block vars
+    // aren't auto-retained). The filter keeps its own reference, so release ours.
+    [matchedDisplay release];
+    matchedDisplay = nil;
 
     cfg_ = [[SCStreamConfiguration alloc] init];
     cfg_.width = (size_t) width_;
@@ -262,7 +266,10 @@ namespace platf {
     __block NSError *startErr = nil;
     dispatch_semaphore_t startSem = dispatch_semaphore_create(0);
     [stream_ startCaptureWithCompletionHandler:^(NSError * _Nullable err) {
-      startErr = err;
+      // MRC: __block object vars are NOT retained by the block. err is an
+      // autoreleased parameter released when the handler's autorelease pool
+      // drains, so retain it to survive past the semaphore wait.
+      startErr = [err retain];
       dispatch_semaphore_signal(startSem);
     }];
     // 5s timeout: capture backend init can be slow on first TCC grant, but a
@@ -275,8 +282,10 @@ namespace platf {
     if (startErr) {
       const char *m = startErr.localizedDescription.UTF8String;
       BOOST_LOG(error) << "ScreenCaptureKit: startCapture failed: "sv << (m ? m : "unknown");
+      [startErr release];
       return false;
     }
+    // startErr is nil here (success path), nothing to release.
 
     BOOST_LOG(info) << "ScreenCaptureKit: capturing display "sv << display_id
                     << " at "sv << width_ << "x"sv << height_;

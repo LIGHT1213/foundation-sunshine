@@ -543,7 +543,7 @@ const KeyCodeMap kKeyCodesMap[] = {
     auto output_name = config::video.output_name;
     // If output_name is set, try to find the display with that display id
     if (!output_name.empty()) {
-      uint32_t max_display = 32;
+      constexpr uint32_t max_display = 32;
       uint32_t display_count;
       CGDirectDisplayID displays[max_display];
       if (CGGetActiveDisplayList(max_display, displays, &display_count) != kCGErrorSuccess) {
@@ -583,9 +583,12 @@ const KeyCodeMap kKeyCodesMap[] = {
   freeInput(void *p) {
     const auto *input = static_cast<macos_input_t *>(p);
 
-    CFRelease(input->source);
-    CFRelease(input->kb_event);
-    CFRelease(input->mouse_event);
+    // CFRelease(NULL) is NOT nil-tolerant and crashes; guard each release in
+    // case input() partially failed (CGEventSourceCreate/CGEventCreate return
+    // NULL under memory pressure or when the HID system is unavailable).
+    if (input->source) CFRelease(input->source);
+    if (input->kb_event) CFRelease(input->kb_event);
+    if (input->mouse_event) CFRelease(input->mouse_event);
 
     delete input;
   }

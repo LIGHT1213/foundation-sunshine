@@ -30,8 +30,21 @@ namespace platf {
       void *byteSampleBuffer = TPCircularBufferTail(&av_audio_capture->audioSampleBuffer, &length);
 
       while (length < sample_size * sizeof(float)) {
-        [av_audio_capture.samplesArrivedSignal wait];
+        // Bounded wait (500ms) so a stalled capture session (device unplugged,
+        // app backgrounded) cannot wedge the audio pull thread forever. The
+        // previous DISPATCH-equivalent [signal wait] with no timeout deadlocked.
+        if (![av_audio_capture.samplesArrivedSignal waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.5]]) {
+          BOOST_LOG(warning) << "Microphone: timed out waiting for audio data."sv;
+          return capture_e::timeout;
+        }
         byteSampleBuffer = TPCircularBufferTail(&av_audio_capture->audioSampleBuffer, &length);
+      }
+
+      // TPCircularBufferTail can return NULL when fillCount==0; never feed NULL
+      // to std::vector (UB/segfault). Emit silence instead.
+      if (!byteSampleBuffer) {
+        std::fill_n(std::begin(sample_in), sample_size, 0.0f);
+        return capture_e::ok;
       }
 
       const float *sampleBuffer = (float *) byteSampleBuffer;

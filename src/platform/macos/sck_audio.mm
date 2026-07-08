@@ -154,7 +154,7 @@ namespace platf {
         BOOST_LOG(error) << "SCK audio: enumerate failed: "sv << (m ? m : "unknown");
       }
       else if (content.displays.count > 0) {
-        matchedDisplay = content.displays.firstObject;
+        matchedDisplay = [content.displays.firstObject retain];  // MRC: __block not auto-retained
       }
       dispatch_semaphore_signal(sem);
     }];
@@ -177,6 +177,9 @@ namespace platf {
 
     SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:matchedDisplay
                                                       excludingWindows:@[]];
+    // Release our retain on matchedDisplay (filter keeps its own reference).
+    [matchedDisplay release];
+    matchedDisplay = nil;
 
     SCStreamConfiguration *cfg = [[SCStreamConfiguration alloc] init];
     cfg.capturesAudio = YES;
@@ -203,7 +206,7 @@ namespace platf {
     __block NSError *startErr = nil;
     dispatch_semaphore_t startSem = dispatch_semaphore_create(0);
     [stream_ startCaptureWithCompletionHandler:^(NSError * _Nullable err) {
-      startErr = err;
+      startErr = [err retain];  // MRC: retain autoreleased err past the handler
       dispatch_semaphore_signal(startSem);
     }];
     // 5s timeout for stream start (capture backend init can be slow on first grant).
@@ -215,6 +218,7 @@ namespace platf {
     if (startErr) {
       const char *m = startErr.localizedDescription.UTF8String;
       BOOST_LOG(error) << "SCK audio: startCapture failed: "sv << (m ? m : "unknown");
+      [startErr release];
       return false;
     }
 
