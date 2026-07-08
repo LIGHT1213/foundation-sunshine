@@ -6,11 +6,13 @@
 #include "src/platform/macos/av_img_t.h"
 #include "src/platform/macos/av_video.h"
 #include "src/platform/macos/nv12_zero_device.h"
+#include "src/platform/macos/sck_capture.h"
 
 #include "src/config.h"
 #include "src/logging.h"
 
 #import <Metal/Metal.h>
+#import <AppKit/AppKit.h>
 
 // Avoid conflict between AVFoundation and libavutil both defining AVMediaType
 #define AVMediaType AVMediaType_FFmpeg
@@ -151,6 +153,40 @@ namespace platf {
     }
   };
 
+  // Enumerate displays via NSScreen (safe even without screen-capture
+  // permission, unlike AVVideo's displayNames which inserts nil into an
+  // NSDictionary). Returns the matched CGDirectDisplayID for display_name,
+  // or CGMainDisplayID() as a safe default.
+  namespace {
+    struct display_info_t {
+      CGDirectDisplayID id;
+      std::string name;
+    };
+
+    std::vector<display_info_t>
+    enumerate_displays() {
+      std::vector<display_info_t> result;
+      @autoreleasepool {
+        NSArray<NSScreen *> *screens = [NSScreen screens];
+        for (NSScreen *screen in screens) {
+          display_info_t info {};
+          NSNumber *num = screen.deviceDescription[@"NSScreenNumber"];
+          info.id = num.unsignedIntValue;
+          // localizedName is macOS 10.15+; fall back to a generic label.
+          NSString *name = screen.localizedName;
+          info.name = name ? std::string(name.UTF8String) : ("Display " + std::to_string(info.id));
+          result.push_back(std::move(info));
+        }
+      }
+      if (result.empty()) {
+        // No screens reported (e.g. headless). Provide the main display id so
+        // capture can still be attempted and fail with a clear error.
+        result.push_back({ CGMainDisplayID(), "Main Display" });
+      }
+      return result;
+    }
+  }  // namespace
+
   std::shared_ptr<display_t>
   display(platf::mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
     if (hwdevice_type != platf::mem_type_e::system && hwdevice_type != platf::mem_type_e::videotoolbox) {
@@ -158,26 +194,30 @@ namespace platf {
       return nullptr;
     }
 
-    auto display = std::make_shared<av_display_t>();
-
-    // Default to main display
-    display->display_id = CGMainDisplayID();
-
-    // Print all displays available with it's name and id
-    auto display_array = [AVVideo displayNames];
+    // Resolve the target display id from the user-supplied name (which is the
+    // CGDirectDisplayID as a decimal string on macOS, matching upstream).
+    CGDirectDisplayID requested_id = CGMainDisplayID();
+    const auto infos = enumerate_displays();
     BOOST_LOG(info) << "Detecting displays"sv;
-    for (NSDictionary *item in display_array) {
-      NSNumber *display_id = item[@"id"];
-      // We need show display's product name and corresponding display number given by user
-      NSString *name = item[@"displayName"];
-      // We are using CGGetActiveDisplayList that only returns active displays so hardcoded connected value in log to true
-      BOOST_LOG(info) << "Detected display: "sv << name.UTF8String << " (id: "sv << [NSString stringWithFormat:@"%@", display_id].UTF8String << ") connected: true"sv;
-      if (!display_name.empty() && std::atoi(display_name.c_str()) == [display_id unsignedIntValue]) {
-        display->display_id = [display_id unsignedIntValue];
+    for (const auto &di : infos) {
+      BOOST_LOG(info) << "Detected display: "sv << di.name << " (id: "sv << di.id << ") connected: true"sv;
+      if (!display_name.empty() && std::atoi(display_name.c_str()) == (int) di.id) {
+        requested_id = di.id;
       }
     }
-    BOOST_LOG(info) << "Configuring selected display ("sv << display->display_id << ") to stream"sv;
+    BOOST_LOG(info) << "Configuring selected display ("sv << requested_id << ") to stream"sv;
 
+    // Prefer ScreenCaptureKit (macOS 12.3+): high frame rate, per-display,
+    // and does not crash on missing permission. Fall back to the legacy
+    // AVFoundation capture when SCK is unavailable or the stream setup fails.
+    auto sck_disp = make_sck_display(requested_id, config.framerate);
+    if (sck_disp) {
+      return sck_disp;
+    }
+    BOOST_LOG(warning) << "ScreenCaptureKit unavailable; falling back to AVFoundation capture (60fps cap, no HDR)."sv;
+
+    auto display = std::make_shared<av_display_t>();
+    display->display_id = requested_id;
     display->av_capture = [[AVVideo alloc] initWithDisplay:display->display_id frameRate:config.framerate];
 
     if (!display->av_capture) {
@@ -195,18 +235,14 @@ namespace platf {
   }
 
   std::vector<std::string>
-  display_names(mem_type_e hwdevice_type) {
-    __block std::vector<std::string> display_names;
-
-    auto display_array = [AVVideo displayNames];
-
-    display_names.reserve([display_array count]);
-    [display_array enumerateObjectsUsingBlock:^(NSDictionary *_Nonnull obj, NSUInteger idx, BOOL *_Nonnull stop) {
-      NSString *name = obj[@"name"];
-      display_names.emplace_back(name.UTF8String);
-    }];
-
-    return display_names;
+  display_names(mem_type_e /*hwdevice_type*/) {
+    std::vector<std::string> names;
+    const auto infos = enumerate_displays();
+    names.reserve(infos.size());
+    for (const auto &info : infos) {
+      names.push_back(info.name);
+    }
+    return names;
   }
 
   /**
