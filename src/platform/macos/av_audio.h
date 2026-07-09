@@ -97,6 +97,25 @@ typedef struct {
  */
 - (int)setupSystemTap:(UInt32)sampleRate frameSize:(UInt32)frameSize channels:(UInt8)channels;
 
+/**
+ * @brief Find a Core Audio input device by name (supports virtual devices like BlackHole).
+ * Searches all input devices via Core Audio API (more reliable than AVFoundation for virtual devices).
+ * @param name Device name to search for (e.g. "BlackHole 2ch")
+ * @return Device ID if found, kAudioObjectUnknown otherwise
+ */
++ (AudioObjectID)findInputDeviceByName:(NSString *)name;
+
+/**
+ * @brief Set up audio capture from a specific Core Audio input device (e.g. BlackHole).
+ * Uses AudioDeviceCreateIOProcID to capture directly from the device.
+ * @param deviceID The Core Audio device ID to capture from
+ * @param sampleRate Target sample rate in Hz
+ * @param frameSize Number of frames per buffer
+ * @param channels Number of audio channels
+ * @return 0 on success, -1 on failure
+ */
+- (int)setupDeviceCapture:(AudioObjectID)deviceID sampleRate:(UInt32)sampleRate frameSize:(UInt32)frameSize channels:(UInt8)channels;
+
 - (void)initializeAudioBuffer:(UInt8)channels;
 - (void)cleanupAudioBuffer;
 - (void)cleanupSystemTapContext:(nullable id)tapDescription;

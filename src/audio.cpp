@@ -566,20 +566,6 @@ namespace audio {
       sample_buffer.resize(samples_per_frame);
 
       auto status = mic->sample(sample_buffer);
-      // One-shot diagnostic: log the peak amplitude of the first few audio
-      // frames to determine if real audio data is flowing through the pipeline.
-      {
-        static int diag_count = 0;
-        if (diag_count < 5 && status == platf::capture_e::ok) {
-          float peak = 0.0f;
-          for (float s : sample_buffer) {
-            float a = s < 0 ? -s : s;
-            if (a > peak) peak = a;
-          }
-          BOOST_LOG(info) << "Audio frame #" << (diag_count + 1) << " peak=" << peak << (peak > 0.0001f ? " [AUDIO]" : " [SILENCE]");
-          diag_count++;
-        }
-      }
       switch (status) {
         case platf::capture_e::ok:
           break;

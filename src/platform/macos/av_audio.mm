@@ -186,6 +186,204 @@ namespace platf {
   return nil;
 }
 
++ (AudioObjectID)findInputDeviceByName:(NSString *)name {
+  using namespace std::literals;
+
+  if (!name) {
+    return kAudioObjectUnknown;
+  }
+
+  AudioObjectPropertyAddress propertyAddress = {
+    .mSelector = kAudioHardwarePropertyDevices,
+    .mScope = kAudioObjectPropertyScopeGlobal,
+    .mElement = kAudioObjectPropertyElementMain
+  };
+
+  UInt32 dataSize = 0;
+  OSStatus status = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &dataSize);
+  if (status != noErr || dataSize == 0) {
+    return kAudioObjectUnknown;
+  }
+
+  UInt32 deviceCount = dataSize / sizeof(AudioObjectID);
+  AudioObjectID *deviceIDs = (AudioObjectID *) malloc(dataSize);
+  if (!deviceIDs) {
+    return kAudioObjectUnknown;
+  }
+
+  status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &propertyAddress, 0, NULL, &dataSize, deviceIDs);
+  if (status != noErr) {
+    free(deviceIDs);
+    return kAudioObjectUnknown;
+  }
+
+  AudioObjectID foundID = kAudioObjectUnknown;
+  for (UInt32 i = 0; i < deviceCount; i++) {
+    // Check if this device has input streams
+    AudioObjectPropertyAddress inputAddr = {
+      .mSelector = kAudioDevicePropertyStreamConfiguration,
+      .mScope = kAudioDevicePropertyScopeInput,
+      .mElement = kAudioObjectPropertyElementMain
+    };
+    UInt32 inputSize = 0;
+    AudioObjectGetPropertyDataSize(deviceIDs[i], &inputAddr, 0, NULL, &inputSize);
+    if (inputSize == 0) {
+      continue;  // not an input device
+    }
+
+    // Get device name
+    AudioObjectPropertyAddress nameAddr = {
+      .mSelector = kAudioDevicePropertyDeviceName,
+      .mScope = kAudioObjectPropertyScopeGlobal,
+      .mElement = kAudioObjectPropertyElementMain
+    };
+    CFStringRef deviceName = NULL;
+    UInt32 nameSize = sizeof(deviceName);
+    AudioObjectGetPropertyData(deviceIDs[i], &nameAddr, 0, NULL, &nameSize, &deviceName);
+
+    if (deviceName) {
+      BOOL match = [name isEqualToString: (__bridge NSString *) deviceName];
+      CFRelease(deviceName);
+      if (match) {
+        foundID = deviceIDs[i];
+        break;
+      }
+    }
+  }
+
+  free(deviceIDs);
+  return foundID;
+}
+
+- (int)setupDeviceCapture:(AudioObjectID)deviceID sampleRate:(UInt32)sampleRate frameSize:(UInt32)frameSize channels:(UInt8)channels {
+  using namespace std::literals;
+
+  if (deviceID == kAudioObjectUnknown) {
+    BOOST_LOG(error) << "Cannot setup device capture: invalid device ID"sv;
+    return -1;
+  }
+
+  // Get device name for logging
+  AudioObjectPropertyAddress nameAddr = {
+    .mSelector = kAudioDevicePropertyDeviceName,
+    .mScope = kAudioObjectPropertyScopeGlobal,
+    .mElement = kAudioObjectPropertyElementMain
+  };
+  CFStringRef deviceName = NULL;
+  UInt32 nameSize = sizeof(deviceName);
+  AudioObjectGetPropertyData(deviceID, &nameAddr, 0, NULL, &nameSize, &deviceName);
+  if (deviceName) {
+    BOOST_LOG(info) << "Setting up Core Audio device capture: "sv << [(__bridge NSString *) deviceName UTF8String];
+    CFRelease(deviceName);
+  }
+
+  // Query actual device sample rate and channel count
+  Float64 deviceSampleRate = (Float64) sampleRate;
+  UInt32 sampleRateSize = sizeof(Float64);
+  AudioObjectPropertyAddress sampleRateAddr = {
+    .mSelector = kAudioDevicePropertyNominalSampleRate,
+    .mScope = kAudioObjectPropertyScopeGlobal,
+    .mElement = kAudioObjectPropertyElementMain
+  };
+  OSStatus rateStatus = AudioObjectGetPropertyData(deviceID, &sampleRateAddr, 0, NULL, &sampleRateSize, &deviceSampleRate);
+  if (rateStatus != noErr || deviceSampleRate <= 0.0) {
+    deviceSampleRate = (Float64) sampleRate;
+  }
+  BOOST_LOG(debug) << "Device sample rate: "sv << deviceSampleRate << "Hz (requested "sv << sampleRate << "Hz)"sv;
+
+  UInt32 deviceChannels = channels;
+  AudioObjectPropertyAddress streamConfigAddr = {
+    .mSelector = kAudioDevicePropertyStreamConfiguration,
+    .mScope = kAudioDevicePropertyScopeInput,
+    .mElement = kAudioObjectPropertyElementMain
+  };
+  UInt32 streamConfigSize = 0;
+  AudioObjectGetPropertyDataSize(deviceID, &streamConfigAddr, 0, NULL, &streamConfigSize);
+  if (streamConfigSize > 0) {
+    AudioBufferList *streamConfig = (AudioBufferList *) malloc(streamConfigSize);
+    if (streamConfig) {
+      AudioObjectGetPropertyData(deviceID, &streamConfigAddr, 0, NULL, &streamConfigSize, streamConfig);
+      if (streamConfig->mNumberBuffers > 0) {
+        deviceChannels = streamConfig->mBuffers[0].mNumberChannels;
+      }
+      free(streamConfig);
+    }
+  }
+  BOOST_LOG(debug) << "Device channels: "sv << deviceChannels << " (requested "sv << (int) channels << ")"sv;
+
+  // Set up format conversion if needed
+  BOOL needsConversion = (deviceSampleRate != (Float64) sampleRate) || (deviceChannels != (UInt32) channels);
+
+  // Allocate ioProcData
+  self->ioProcData = (AVAudioIOProcData *) malloc(sizeof(AVAudioIOProcData));
+  if (!self->ioProcData) {
+    return -1;
+  }
+  self->ioProcData->avAudio = self;
+  self->ioProcData->clientRequestedChannels = channels;
+  self->ioProcData->clientRequestedFrameSize = frameSize;
+  self->ioProcData->clientRequestedSampleRate = sampleRate;
+  self->ioProcData->aggregateDeviceSampleRate = (UInt32) deviceSampleRate;
+  self->ioProcData->aggregateDeviceChannels = deviceChannels;
+  self->ioProcData->audioConverter = NULL;
+  self->ioProcData->conversionBuffer = NULL;
+  self->ioProcData->conversionBufferSize = 0;
+
+  if (needsConversion) {
+    AudioStreamBasicDescription sourceFormat = { 0 };
+    sourceFormat.mSampleRate = deviceSampleRate;
+    sourceFormat.mFormatID = kAudioFormatLinearPCM;
+    sourceFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    sourceFormat.mBytesPerPacket = sizeof(float) * deviceChannels;
+    sourceFormat.mFramesPerPacket = 1;
+    sourceFormat.mBytesPerFrame = sizeof(float) * deviceChannels;
+    sourceFormat.mChannelsPerFrame = deviceChannels;
+    sourceFormat.mBitsPerChannel = 32;
+
+    AudioStreamBasicDescription targetFormat = { 0 };
+    targetFormat.mSampleRate = (Float64) sampleRate;
+    targetFormat.mFormatID = kAudioFormatLinearPCM;
+    targetFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    targetFormat.mBytesPerPacket = sizeof(float) * channels;
+    targetFormat.mFramesPerPacket = 1;
+    targetFormat.mBytesPerFrame = sizeof(float) * channels;
+    targetFormat.mChannelsPerFrame = channels;
+    targetFormat.mBitsPerChannel = 32;
+
+    AudioConverterNew(&sourceFormat, &targetFormat, &self->ioProcData->audioConverter);
+  }
+
+  // Pre-allocate conversion buffer
+  UInt32 maxFrames = frameSize * 8;
+  self->ioProcData->conversionBufferSize = maxFrames * channels * sizeof(float);
+  self->ioProcData->conversionBuffer = (float *) malloc(self->ioProcData->conversionBufferSize);
+
+  // Initialize the ring buffer + semaphore
+  [self initializeAudioBuffer: channels];
+
+  // Create and start the IOProc on this device
+  self->aggregateDeviceID = deviceID;  // reuse the IOProc path; systemAudioIOProc reads from aggregateDeviceID
+  self->tapObjectID = kAudioObjectUnknown;
+  self->ioProcID = NULL;
+
+  OSStatus status = AudioDeviceCreateIOProcID(deviceID, platf::systemAudioIOProc, self->ioProcData, &self->ioProcID);
+  if (status != kAudioHardwareNoError) {
+    BOOST_LOG(error) << "AudioDeviceCreateIOProcID failed: "sv << ca::Status(status);
+    return -1;
+  }
+
+  status = AudioDeviceStart(deviceID, self->ioProcID);
+  if (status != kAudioHardwareNoError) {
+    BOOST_LOG(error) << "AudioDeviceStart failed: "sv << ca::Status(status);
+    AudioDeviceDestroyIOProcID(deviceID, self->ioProcID);
+    self->ioProcID = NULL;
+    return -1;
+  }
+
+  BOOST_LOG(info) << "Core Audio device capture started successfully"sv;
+  return 0;
+}
+
 - (int)setupMicrophone:(AVCaptureDevice *)device sampleRate:(UInt32)sampleRate frameSize:(UInt32)frameSize channels:(UInt8)channels {
   using namespace std::literals;
 

@@ -87,6 +87,19 @@ namespace platf {
         const char *audio_sink = config::audio.sink.c_str();
         BOOST_LOG(info) << "Using configured audio sink: "sv << audio_sink;
 
+        // Try Core Audio device capture first (supports virtual devices like BlackHole)
+        AudioObjectID devID = [AVAudio findInputDeviceByName:[NSString stringWithUTF8String:audio_sink]];
+        if (devID != kAudioObjectUnknown) {
+          auto mic = std::make_unique<av_mic_t>();
+          mic->av_audio_capture = [[AVAudio alloc] init];
+          mic->av_audio_capture.hostAudioEnabled = YES;
+          if ([mic->av_audio_capture setupDeviceCapture:devID sampleRate:sample_rate frameSize:frame_size channels:channels] == 0) {
+            return mic;
+          }
+          BOOST_LOG(warning) << "Core Audio device capture failed for sink, trying AVFoundation."sv;
+        }
+
+        // Fallback: AVFoundation microphone path
         auto mic = std::make_unique<av_mic_t>();
         mic->av_audio_capture = [[AVAudio alloc] init];
         mic->av_audio_capture.hostAudioEnabled = YES;
@@ -108,30 +121,45 @@ namespace platf {
         return mic;
       }
 
-      // System audio capture: prefer Core Audio Tap (macOS 14.0+)
+      // No explicit sink configured. Auto-detect BlackHole for system audio capture.
+      // BlackHole routes system audio to a virtual input device, letting us capture
+      // without the host playing sound through speakers (host stays silent).
+      NSArray<NSString *> *blackholeNames = @[@"BlackHole 2ch", @"BlackHole 16ch", @"BlackHole 64ch", @"BlackHole 128ch", @"BlackHole"];
+      for (NSString *bwName in blackholeNames) {
+        AudioObjectID devID = [AVAudio findInputDeviceByName:bwName];
+        if (devID != kAudioObjectUnknown) {
+          BOOST_LOG(info) << "Found virtual audio device: "sv << [bwName UTF8String] << " — using for system audio capture"sv;
+          BOOST_LOG(info) << "IMPORTANT: set your system output to this BlackHole device to stream audio (host will be silent)."sv;
+          auto mic = std::make_unique<av_mic_t>();
+          mic->av_audio_capture = [[AVAudio alloc] init];
+          mic->av_audio_capture.hostAudioEnabled = YES;
+          if ([mic->av_audio_capture setupDeviceCapture:devID sampleRate:sample_rate frameSize:frame_size channels:channels] == 0) {
+            return mic;
+          }
+          BOOST_LOG(warning) << "Failed to capture from "sv << [bwName UTF8String] << ", trying next option."sv;
+        }
+      }
+
+      // No BlackHole found. Try Core Audio Process Tap (macOS 14.0+) as last resort.
+      // Note: Tap may deliver silence under certain TCC configurations.
       if (@available(macOS 14.0, *)) {
         auto mic = std::make_unique<av_mic_t>();
         mic->av_audio_capture = [[AVAudio alloc] init];
         mic->av_audio_capture.hostAudioEnabled = YES;
 
-        BOOST_LOG(info) << "Using macOS Core Audio system tap for capture."sv;
+        BOOST_LOG(info) << "No BlackHole found. Trying Core Audio system tap (install BlackHole for reliable capture)."sv;
         if ([mic->av_audio_capture setupSystemTap:sample_rate frameSize:frame_size channels:channels] == 0) {
-          BOOST_LOG(info) << "Core Audio tap initialized successfully ("sv << channels << "ch @ "sv << sample_rate << "Hz)"sv;
           return mic;
         }
-
-        BOOST_LOG(warning) << "Core Audio system tap failed; falling back to ScreenCaptureKit audio."sv;
-        // mic->av_audio_capture will be released when av_mic_t is destroyed below;
-        // but we haven't returned it yet, so it dies with the unique_ptr.
       }
 
-      // Fallback: ScreenCaptureKit audio (macOS 13.0+)
+      // Final fallback: ScreenCaptureKit audio
       auto sck = make_sck_system_audio(channels, sample_rate, frame_size);
       if (sck) {
         return sck;
       }
 
-      BOOST_LOG(error) << "All system audio capture methods failed. No audio will be streamed."sv;
+      BOOST_LOG(error) << "All audio capture methods failed. Install BlackHole and set it as system output."sv;
       return nullptr;
     }
 
