@@ -24,35 +24,33 @@ namespace platf {
 
     capture_e
     sample(std::vector<float> &sample_in) override {
-      auto sample_size = sample_in.size();
+      const uint32_t neededBytes = static_cast<uint32_t>(sample_in.size() * sizeof(float));
+      uint8_t *dst = reinterpret_cast<uint8_t *>(sample_in.data());
 
-      uint32_t length = 0;
-      void *byteSampleBuffer = TPCircularBufferTail(&av_audio_capture->audioSampleBuffer, &length);
+      uint32_t remaining = neededBytes;
 
-      while (length < sample_size * sizeof(float)) {
-        // Bounded wait (500ms) so a stalled capture session (device unplugged,
-        // app backgrounded) cannot wedge the audio pull thread forever. The
-        // previous DISPATCH-equivalent [signal wait] with no timeout deadlocked.
-        if (![av_audio_capture.samplesArrivedSignal waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.5]]) {
-          BOOST_LOG(warning) << "Microphone: timed out waiting for audio data."sv;
-          return capture_e::timeout;
+      while (remaining > 0) {
+        uint32_t avail = 0;
+        void *tail = TPCircularBufferTail(&av_audio_capture->audioSampleBuffer, &avail);
+
+        if (avail == 0) {
+          // 5 second timeout prevents indefinite hanging on a stalled session.
+          dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
+          if (dispatch_semaphore_wait(av_audio_capture->audioSemaphore, timeout) != 0) {
+            BOOST_LOG(warning) << "Audio sample timeout - no audio data within 5 seconds"sv;
+            std::fill(sample_in.begin(), sample_in.end(), 0.0f);
+            return capture_e::timeout;
+          }
+          continue;
         }
-        byteSampleBuffer = TPCircularBufferTail(&av_audio_capture->audioSampleBuffer, &length);
+
+        const uint32_t toCopy = (avail < remaining) ? avail : remaining;
+        std::memcpy(dst, tail, toCopy);
+        TPCircularBufferConsume(&av_audio_capture->audioSampleBuffer, toCopy);
+
+        dst += toCopy;
+        remaining -= toCopy;
       }
-
-      // TPCircularBufferTail can return NULL when fillCount==0; never feed NULL
-      // to std::vector (UB/segfault). Emit silence instead.
-      if (!byteSampleBuffer) {
-        std::fill_n(std::begin(sample_in), sample_size, 0.0f);
-        return capture_e::ok;
-      }
-
-      const float *sampleBuffer = (float *) byteSampleBuffer;
-      std::vector<float> vectorBuffer(sampleBuffer, sampleBuffer + sample_size);
-
-      std::copy_n(std::begin(vectorBuffer), sample_size, std::begin(sample_in));
-
-      TPCircularBufferConsume(&av_audio_capture->audioSampleBuffer, sample_size * sizeof(float));
 
       return capture_e::ok;
     }
@@ -73,51 +71,73 @@ namespace platf {
       // The platf::audio_control_t::microphone() contract on Sunshine is
       // "capture the audio to stream TO the client" (i.e. system playback,
       // the equivalent of WASAPI loopback on Windows / PulseAudio monitor on
-      // Linux). On macOS that is system audio, captured via ScreenCaptureKit
-      // (macOS 13.0+). The legacy AVFoundation path below only captures the
-      // microphone input device, which is the wrong thing for streaming game
-      // audio — it is kept only as a last-resort fallback.
+      // Linux). On macOS that is system audio.
+      //
+      // Capture path priority:
+      // 1. Core Audio Process Tap (macOS 14.0+) — the official LizardByte
+      //    approach, delivers interleaved float32 directly, no SCK quirks.
+      // 2. ScreenCaptureKit audio (macOS 13.0+) — fallback if Tap unavailable.
+      // 3. AVFoundation microphone — only when the user explicitly configures
+      //    an input sink (config::audio.sink); streams mic input, not game audio.
       (void) mapping;
       (void) continuous_audio;
 
+      // If user explicitly configured a sink, capture that specific input device.
+      if (!config::audio.sink.empty()) {
+        const char *audio_sink = config::audio.sink.c_str();
+        BOOST_LOG(info) << "Using configured audio sink: "sv << audio_sink;
+
+        auto mic = std::make_unique<av_mic_t>();
+        mic->av_audio_capture = [[AVAudio alloc] init];
+        mic->av_audio_capture.hostAudioEnabled = YES;
+
+        if ((audio_capture_device = [AVAudio findMicrophone:[NSString stringWithUTF8String:audio_sink]]) == nullptr) {
+          BOOST_LOG(error) << "opening microphone '"sv << audio_sink << "' failed."sv;
+          BOOST_LOG(error) << "Available inputs:"sv;
+          for (NSString *name in [AVAudio microphoneNames]) {
+            BOOST_LOG(error) << "\t"sv << [name UTF8String];
+          }
+          return nullptr;
+        }
+
+        if ([mic->av_audio_capture setupMicrophone:audio_capture_device sampleRate:sample_rate frameSize:frame_size channels:channels]) {
+          BOOST_LOG(error) << "Failed to setup microphone."sv;
+          return nullptr;
+        }
+
+        return mic;
+      }
+
+      // System audio capture: prefer Core Audio Tap (macOS 14.0+)
+      if (@available(macOS 14.0, *)) {
+        auto mic = std::make_unique<av_mic_t>();
+        mic->av_audio_capture = [[AVAudio alloc] init];
+        mic->av_audio_capture.hostAudioEnabled = YES;
+
+        BOOST_LOG(info) << "Using macOS Core Audio system tap for capture."sv;
+        if ([mic->av_audio_capture setupSystemTap:sample_rate frameSize:frame_size channels:channels] == 0) {
+          BOOST_LOG(info) << "Core Audio tap initialized successfully ("sv << channels << "ch @ "sv << sample_rate << "Hz)"sv;
+          return mic;
+        }
+
+        BOOST_LOG(warning) << "Core Audio system tap failed; falling back to ScreenCaptureKit audio."sv;
+        // mic->av_audio_capture will be released when av_mic_t is destroyed below;
+        // but we haven't returned it yet, so it dies with the unique_ptr.
+      }
+
+      // Fallback: ScreenCaptureKit audio (macOS 13.0+)
       auto sck = make_sck_system_audio(channels, sample_rate, frame_size);
       if (sck) {
         return sck;
       }
-      BOOST_LOG(warning) << "SCK system audio unavailable; falling back to AVAudio microphone capture (will stream mic, not game audio)."sv;
 
-      auto mic = std::make_unique<av_mic_t>();
-      const char *audio_sink = "";
-
-      if (!config::audio.sink.empty()) {
-        audio_sink = config::audio.sink.c_str();
-      }
-
-      if ((audio_capture_device = [AVAudio findMicrophone:[NSString stringWithUTF8String:audio_sink]]) == nullptr) {
-        BOOST_LOG(error) << "opening microphone '"sv << audio_sink << "' failed. Please set a valid input source in the Sunshine config."sv;
-        BOOST_LOG(error) << "Available inputs:"sv;
-
-        for (NSString *name in [AVAudio microphoneNames]) {
-          BOOST_LOG(error) << "\t"sv << [name UTF8String];
-        }
-
-        return nullptr;
-      }
-
-      mic->av_audio_capture = [[AVAudio alloc] init];
-
-      if ([mic->av_audio_capture setupMicrophone:audio_capture_device sampleRate:sample_rate frameSize:frame_size channels:channels]) {
-        BOOST_LOG(error) << "Failed to setup microphone."sv;
-        return nullptr;
-      }
-
-      return mic;
+      BOOST_LOG(error) << "All system audio capture methods failed. No audio will be streamed."sv;
+      return nullptr;
     }
 
     std::optional<sink_t>
     sink_info() override {
       sink_t sink;
-
       return sink;
     }
 
@@ -130,9 +150,6 @@ namespace platf {
     int
     write_mic_data(const char *data, size_t size, uint16_t seq = 0) override {
       // Render client microphone audio to the host's default output device.
-      // NOTE: this is "voice intercom" only — macOS has no public API to
-      // create a virtual input device that games would pick up as a local mic.
-      // See src/platform/macos/mic_write.h for details.
       if (!mic_redirect) {
         return -1;
       }
@@ -141,9 +158,8 @@ namespace platf {
 
     int
     init_mic_redirect_device() override {
-      // Lazily create the Core Audio render session on first use.
       if (mic_redirect) {
-        return 0;  // already initialized
+        return 0;
       }
       mic_redirect = std::make_unique<platf::audio::mic_write_coreaudio_t>();
       if (mic_redirect->init() != 0) {
