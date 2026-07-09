@@ -2658,6 +2658,14 @@ namespace stream {
         break;
       }
 
+      // Periodic summary: log every 100 packets (~5s at 5ms packetDuration) to
+      // confirm packets are continuously flowing, not just seq#0.
+      if (sequenceNumber % 100 == 0) {
+        BOOST_LOG(info) << "Audio flow: sent "sv << (sequenceNumber + 1)
+                        << " packets, last plaintext_size="sv << plaintext_size
+                        << " bytes, pts="sv << timestamp << "ms"sv;
+      }
+
       BOOST_LOG(verbose) << "Audio [seq "sv << sequenceNumber << ", pts "sv << timestamp << "] ::  send..."sv;
 
       audio_packet.rtp.sequenceNumber = util::endian::big(sequenceNumber);
