@@ -259,17 +259,17 @@ namespace platf {
       continue;  // not an input device
     }
 
-    // Get device name
+    // Get device name (CFString variant — returns a retained CFStringRef)
     AudioObjectPropertyAddress nameAddr = {
-      .mSelector = kAudioDevicePropertyDeviceName,
+      .mSelector = kAudioDevicePropertyDeviceNameCFString,
       .mScope = kAudioObjectPropertyScopeGlobal,
       .mElement = kAudioObjectPropertyElementMain
     };
     CFStringRef deviceName = NULL;
     UInt32 nameSize = sizeof(deviceName);
-    AudioObjectGetPropertyData(deviceIDs[i], &nameAddr, 0, NULL, &nameSize, &deviceName);
+    OSStatus nameStatus = AudioObjectGetPropertyData(deviceIDs[i], &nameAddr, 0, NULL, &nameSize, &deviceName);
 
-    if (deviceName) {
+    if (nameStatus == noErr && deviceName) {
       BOOL match = [name isEqualToString: (__bridge NSString *) deviceName];
       CFRelease(deviceName);
       if (match) {
@@ -291,16 +291,16 @@ namespace platf {
     return -1;
   }
 
-  // Get device name for logging
+  // Get device name for logging (CFString variant)
   AudioObjectPropertyAddress nameAddr = {
-    .mSelector = kAudioDevicePropertyDeviceName,
+    .mSelector = kAudioDevicePropertyDeviceNameCFString,
     .mScope = kAudioObjectPropertyScopeGlobal,
     .mElement = kAudioObjectPropertyElementMain
   };
   CFStringRef deviceName = NULL;
   UInt32 nameSize = sizeof(deviceName);
-  AudioObjectGetPropertyData(deviceID, &nameAddr, 0, NULL, &nameSize, &deviceName);
-  if (deviceName) {
+  OSStatus nameStatus = AudioObjectGetPropertyData(deviceID, &nameAddr, 0, NULL, &nameSize, &deviceName);
+  if (nameStatus == noErr && deviceName) {
     BOOST_LOG(info) << "Setting up Core Audio device capture: "sv << [(__bridge NSString *) deviceName UTF8String];
     CFRelease(deviceName);
   }

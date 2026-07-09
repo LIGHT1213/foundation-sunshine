@@ -82,6 +82,8 @@ namespace platf {
       (void) mapping;
       (void) continuous_audio;
 
+      BOOST_LOG(info) << "Audio: selecting capture device (sink='"sv << (config::audio.sink.empty() ? "(none)"sv : config::audio.sink) << "')"sv;
+
       // If user explicitly configured a sink, capture that specific input device.
       if (!config::audio.sink.empty()) {
         const char *audio_sink = config::audio.sink.c_str();
@@ -124,16 +126,19 @@ namespace platf {
       // No explicit sink configured. Auto-detect BlackHole for system audio capture.
       // BlackHole routes system audio to a virtual input device, letting us capture
       // without the host playing sound through speakers (host stays silent).
+      BOOST_LOG(info) << "Audio: scanning for BlackHole virtual device..."sv;
       NSArray<NSString *> *blackholeNames = @[@"BlackHole 2ch", @"BlackHole 16ch", @"BlackHole 64ch", @"BlackHole 128ch", @"BlackHole"];
       for (NSString *bwName in blackholeNames) {
         AudioObjectID devID = [AVAudio findInputDeviceByName:bwName];
+        BOOST_LOG(info) << "Audio: checking '"sv << [bwName UTF8String] << "' → devID="sv << devID;
         if (devID != kAudioObjectUnknown) {
           BOOST_LOG(info) << "Found virtual audio device: "sv << [bwName UTF8String] << " — using for system audio capture"sv;
-          BOOST_LOG(info) << "IMPORTANT: set your system output to this BlackHole device to stream audio (host will be silent)."sv;
           auto mic = std::make_unique<av_mic_t>();
           mic->av_audio_capture = [[AVAudio alloc] init];
           mic->av_audio_capture.hostAudioEnabled = YES;
+          BOOST_LOG(info) << "Audio: calling setupDeviceCapture..."sv;
           if ([mic->av_audio_capture setupDeviceCapture:devID sampleRate:sample_rate frameSize:frame_size channels:channels] == 0) {
+            BOOST_LOG(info) << "Audio: device capture started, returning mic"sv;
             return mic;
           }
           BOOST_LOG(warning) << "Failed to capture from "sv << [bwName UTF8String] << ", trying next option."sv;
