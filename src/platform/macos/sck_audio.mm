@@ -17,6 +17,7 @@
 #include "src/logging.h"
 
 #include <atomic>
+#include <chrono>
 #include <dispatch/dispatch.h>
 #include <mutex>
 
@@ -375,12 +376,32 @@ namespace platf {
     const std::size_t needed = sample_in.size();
     std::size_t have = 0;
 
+    // Overall deadline for this sample() call. SCK may keep delivering frames
+    // even after the client disconnects (the system is still playing audio),
+    // so the inner "while (have < needed)" loop can run indefinitely if data
+    // is always available — it never reaches the semaphore-wait branch and the
+    // caller never gets a chance to re-check shutdown_event->peek(). A short
+    // deadline (250ms, >> a single Opus frame at 5-20ms) guarantees sample()
+    // returns regularly even when the ring is continuously fed, so the caller's
+    // shutdown peek stays responsive.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+
     while (have < needed) {
       // If the stream stopped (didStopWithError), request reinit so the caller
       // tears down and recreates the SCStream instead of spinning on timeout.
       if (delegate_->stopped_.load(std::memory_order_acquire)) {
         BOOST_LOG(info) << "SCK audio: stream stopped, requesting reinit"sv;
         return capture_e::reinit;
+      }
+
+      // Deadline expired: return what we have so far (padded with silence) so
+      // the caller can re-check shutdown. Without this, continuous audio makes
+      // this loop run forever and wedges session::join.
+      if (std::chrono::steady_clock::now() >= deadline) {
+        if (have < needed) {
+          std::fill_n(sample_in.data() + have, needed - have, 0.0f);
+        }
+        return capture_e::ok;
       }
 
       // Drain any pending SCK sample buffer into the ring buffer.
