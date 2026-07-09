@@ -8,5 +8,7 @@
   <string>Foundation Sunshine</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>This app requires access to your microphone to stream audio.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Sunshine needs to capture system audio to stream sound to your Moonlight client.</string>
 </dict>
 </plist>

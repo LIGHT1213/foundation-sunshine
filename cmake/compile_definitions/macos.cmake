@@ -33,6 +33,17 @@ list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
 
 set(APPLE_PLIST_FILE "${SUNSHINE_SOURCE_ASSETS_DIR}/macos/assets/Info.plist")
 
+# On macOS, ad-hoc signed binaries get a filename-based code-signing identifier
+# that includes the build version timestamp (e.g.
+# "sunshine-2026.0709.230107.1e533f17.杂鱼"). This means TCC permissions (Screen
+# Recording, Microphone, System Audio Recording) are LOST on every rebuild.
+#
+# The actual re-signing command is in cmake/targets/common.cmake (POST_BUILD),
+# because the sunshine target doesn't exist yet when this file is included.
+# See the APPLE_CODESIGN_IDENTIFIER variable below.
+set(APPLE_CODESIGN_IDENTIFIER "com.alkaidlab.sunshine")
+set(APPLE_CODESIGN_ENTITLEMENTS "${CMAKE_SOURCE_DIR}/src_assets/macos/assets/sunshine.entitlements")
+
 # todo - tray is not working on macos
 set(SUNSHINE_TRAY 0)
 

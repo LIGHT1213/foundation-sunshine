@@ -14,6 +14,21 @@ elseif(UNIX)
 
     if(APPLE)
         include(${CMAKE_MODULE_PATH}/targets/macos.cmake)
+
+        # Re-sign the binary with a STABLE identifier after linking.
+        #
+        # Ad-hoc signed binaries default to a filename-based identifier that
+        # includes the build version timestamp. This means TCC permissions
+        # (Screen Recording, Microphone, System Audio Recording) are LOST on
+        # every rebuild. Force a stable identifier so TCC consent persists.
+        # Critical for audio: without a stable identity, macOS silently zeroes
+        # captured audio buffers.
+        add_custom_command(TARGET sunshine POST_BUILD
+                COMMAND codesign --force --sign - --identifier ${APPLE_CODESIGN_IDENTIFIER}
+                        --entitlements ${APPLE_CODESIGN_ENTITLEMENTS}
+                        $<TARGET_FILE:sunshine>
+                COMMENT "Re-signing sunshine with stable identifier '${APPLE_CODESIGN_IDENTIFIER}'"
+                VERBATIM)
     else()
         include(${CMAKE_MODULE_PATH}/targets/linux.cmake)
     endif()

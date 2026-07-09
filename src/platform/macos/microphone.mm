@@ -86,28 +86,56 @@ namespace platf {
       // the equivalent of WASAPI loopback on Windows / PulseAudio monitor on
       // Linux). On macOS that is system audio.
       //
-      // Capture path priority:
-      // 1. Core Audio Process Tap (macOS 14.0+) — the official LizardByte
-      //    approach, delivers interleaved float32 directly, no SCK quirks.
-      // 2. ScreenCaptureKit audio (macOS 13.0+) — fallback if Tap unavailable.
-      // 3. AVFoundation microphone — only when the user explicitly configures
-      //    an input sink (config::audio.sink); streams mic input, not game audio.
+      // Capture path priority (macOS 14.0+):
+      // 1. Core Audio Process Tap — the official, native approach. No third-party
+      //    driver needed. Requires NSAudioCaptureUsageDescription in Info.plist
+      //    and "System Audio Recording" TCC consent. This is what LizardByte
+      //    Sunshine uses in production (PR #4209). The hostAudioEnabled flag
+      //    controls CATapMuted/CATapUnmuted so the host can stay silent.
+      // 2. BlackHole virtual loopback — fallback if Tap unavailable or denied.
+      //    NOTE: BlackHole is BROKEN on macOS 26 (Tahoe) due to CoreAudio stack
+      //    changes — the driver's ring-buffer mirroring no longer works.
+      // 3. ScreenCaptureKit audio — last resort.
+      // 4. AVFoundation microphone — only for explicit mic input (config::audio.sink).
       (void) mapping;
       (void) continuous_audio;
 
-      BOOST_LOG(info) << "Audio: selecting capture device (sink='"sv << (config::audio.sink.empty() ? "(none)"sv : config::audio.sink) << "')"sv;
+      // Determine whether host audio should play during streaming.
+      // The user explicitly wants the host machine to stay silent during
+      // streaming ("我不希望串流的时候sunshine运行的机器有声音"). We default to
+      // CATapMuted (host silent). Set SUNSHINE_HOST_AUDIO=1 to unmute the host.
+      // On macOS the Core Audio Process Tap supports muteBehavior which mutes
+      // the host while still delivering audio to the capture — exactly what we
+      // need. (This differs from BlackHole which always plays through speakers.)
+      const char *hostAudioEnv = std::getenv("SUNSHINE_HOST_AUDIO");
+      BOOL hostAudio = (hostAudioEnv != nullptr && hostAudioEnv[0] == '1');
 
-      // If user explicitly configured a sink, capture that specific input device.
+      BOOST_LOG(info) << "Audio: selecting capture method (sink='"sv << (config::audio.sink.empty() ? "(none)"sv : config::audio.sink)
+                      << "', hostAudio="sv << (hostAudio ? "yes"sv : "no"sv) << ")"sv;
+
+      // Path 1: Core Audio Process Tap (macOS 14.0+) — preferred, native, no driver needed
+      if (@available(macOS 14.0, *)) {
+        BOOST_LOG(info) << "Trying Core Audio Process Tap (native system audio capture)..."sv;
+        auto mic = std::make_unique<av_mic_t>();
+        mic->av_audio_capture = [[AVAudio alloc] init];
+        mic->av_audio_capture.hostAudioEnabled = hostAudio;
+        if ([mic->av_audio_capture setupSystemTap:sample_rate frameSize:frame_size channels:channels] == 0) {
+          BOOST_LOG(info) << "Core Audio Process Tap started successfully"sv;
+          return mic;
+        }
+        BOOST_LOG(warning) << "Core Audio Process Tap failed (may need 'System Audio Recording' permission in System Settings → Privacy & Security)"sv;
+      }
+
+      // Path 2: If user configured an explicit sink, try that device (BlackHole, mic, etc.)
       if (!config::audio.sink.empty()) {
         const char *audio_sink = config::audio.sink.c_str();
-        BOOST_LOG(info) << "Using configured audio sink: "sv << audio_sink;
+        BOOST_LOG(info) << "Trying configured audio sink: "sv << audio_sink;
 
-        // Try Core Audio device capture first (supports virtual devices like BlackHole)
         AudioObjectID devID = [AVAudio findInputDeviceByName:[NSString stringWithUTF8String:audio_sink]];
         if (devID != kAudioObjectUnknown) {
           auto mic = std::make_unique<av_mic_t>();
           mic->av_audio_capture = [[AVAudio alloc] init];
-          mic->av_audio_capture.hostAudioEnabled = YES;
+          mic->av_audio_capture.hostAudioEnabled = hostAudio;
           if ([mic->av_audio_capture setupDeviceCapture:devID sampleRate:sample_rate frameSize:frame_size channels:channels] == 0) {
             return mic;
           }
@@ -117,7 +145,7 @@ namespace platf {
         // Fallback: AVFoundation microphone path
         auto mic = std::make_unique<av_mic_t>();
         mic->av_audio_capture = [[AVAudio alloc] init];
-        mic->av_audio_capture.hostAudioEnabled = YES;
+        mic->av_audio_capture.hostAudioEnabled = hostAudio;
 
         if ((audio_capture_device = [AVAudio findMicrophone:[NSString stringWithUTF8String:audio_sink]]) == nullptr) {
           BOOST_LOG(error) << "opening microphone '"sv << audio_sink << "' failed."sv;
@@ -136,48 +164,33 @@ namespace platf {
         return mic;
       }
 
-      // No explicit sink configured. Auto-detect BlackHole for system audio capture.
-      // BlackHole routes system audio to a virtual input device, letting us capture
-      // without the host playing sound through speakers (host stays silent).
-      BOOST_LOG(info) << "Audio: scanning for BlackHole virtual device..."sv;
+      // Path 3: Auto-detect BlackHole (fallback for pre-macOS 14 or if Tap failed)
+      // Note: On macOS 26 (Tahoe), BlackHole loopback is broken — IOProc fires
+      // but delivers all-zeros. The Tap path above should succeed instead.
+      BOOST_LOG(info) << "Scanning for BlackHole virtual device (fallback)..."sv;
       NSArray<NSString *> *blackholeNames = @[@"BlackHole 2ch", @"BlackHole 16ch", @"BlackHole 64ch", @"BlackHole 128ch", @"BlackHole"];
       for (NSString *bwName in blackholeNames) {
         AudioObjectID devID = [AVAudio findInputDeviceByName:bwName];
-        BOOST_LOG(info) << "Audio: checking '"sv << [bwName UTF8String] << "' → devID="sv << devID;
         if (devID != kAudioObjectUnknown) {
           BOOST_LOG(info) << "Found virtual audio device: "sv << [bwName UTF8String] << " — using for system audio capture"sv;
           auto mic = std::make_unique<av_mic_t>();
           mic->av_audio_capture = [[AVAudio alloc] init];
-          mic->av_audio_capture.hostAudioEnabled = YES;
-          BOOST_LOG(info) << "Audio: calling setupDeviceCapture..."sv;
+          mic->av_audio_capture.hostAudioEnabled = hostAudio;
           if ([mic->av_audio_capture setupDeviceCapture:devID sampleRate:sample_rate frameSize:frame_size channels:channels] == 0) {
-            BOOST_LOG(info) << "Audio: device capture started, returning mic"sv;
             return mic;
           }
           BOOST_LOG(warning) << "Failed to capture from "sv << [bwName UTF8String] << ", trying next option."sv;
         }
       }
 
-      // No BlackHole found. Try Core Audio Process Tap (macOS 14.0+) as last resort.
-      // Note: Tap may deliver silence under certain TCC configurations.
-      if (@available(macOS 14.0, *)) {
-        auto mic = std::make_unique<av_mic_t>();
-        mic->av_audio_capture = [[AVAudio alloc] init];
-        mic->av_audio_capture.hostAudioEnabled = YES;
-
-        BOOST_LOG(info) << "No BlackHole found. Trying Core Audio system tap (install BlackHole for reliable capture)."sv;
-        if ([mic->av_audio_capture setupSystemTap:sample_rate frameSize:frame_size channels:channels] == 0) {
-          return mic;
-        }
-      }
-
-      // Final fallback: ScreenCaptureKit audio
+      // Path 4: ScreenCaptureKit audio (last resort)
       auto sck = make_sck_system_audio(channels, sample_rate, frame_size);
       if (sck) {
         return sck;
       }
 
-      BOOST_LOG(error) << "All audio capture methods failed. Install BlackHole and set it as system output."sv;
+      BOOST_LOG(error) << "All audio capture methods failed."sv
+                       << " On macOS 14+, grant 'System Audio Recording' permission in System Settings → Privacy & Security."sv;
       return nullptr;
     }
 
