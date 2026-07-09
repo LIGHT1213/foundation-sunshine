@@ -602,7 +602,9 @@ const KeyCodeMap kKeyCodesMap[] = {
     if (!macos_input->source || !macos_input->kb_event || !macos_input->mouse_event) {
       BOOST_LOG(error) << "input: failed to create CGEvent source/events (HID "
                        << "system unavailable). Input will be disabled."sv;
-      freeInput(result.get());
+      // result.reset() invokes the freeInput deleter (CFRelease + delete) once.
+      // Do NOT call freeInput manually first — that would double-free, since
+      // safe_ptr::reset() calls the deleter on the current pointer.
       result.reset();
       return result;
     }

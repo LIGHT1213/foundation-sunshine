@@ -83,8 +83,7 @@
     [self.audioCaptureSession addInput:audioInput];
   }
   else {
-    // Never call -dealloc directly; use -release so the dealloc chain runs.
-    [audioInput release];
+    // audioInput is autoreleased (factory method) — do not release it.
     return -1;
   }
 
@@ -110,7 +109,7 @@
     [self.audioCaptureSession addOutput:audioOutput];
   }
   else {
-    [audioInput release];
+    // audioInput is autoreleased — don't release. audioOutput is alloc'd (+1).
     [audioOutput release];
     // Release the session we alloc'd above so this failure path doesn't leak.
     [self.audioCaptureSession release];
@@ -122,7 +121,7 @@
 
   [self.audioCaptureSession startRunning];
 
-  [audioInput release];
+  // audioInput is autoreleased (factory method) — do not release.
   [audioOutput release];
 
 

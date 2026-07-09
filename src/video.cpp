@@ -1292,7 +1292,7 @@ namespace video {
       },
       "h264_videotoolbox"s,
     },
-    DEFAULT
+    PARALLEL_ENCODING
   };
 #endif
 
@@ -2774,6 +2774,8 @@ namespace video {
     std::optional<safe::mail_raw_t::event_t<dynamic_param_t>> dynamic_param_events) {
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
+      BOOST_LOG(error) << "encode_run: make_encode_session returned null for "
+                       << disp->width << "x"sv << disp->height << " "sv << encoder.name;
       return;
     }
 

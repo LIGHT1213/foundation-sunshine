@@ -2921,10 +2921,13 @@ namespace stream {
     while_starting_do_nothing(session->state);
 
     auto ref = broadcast_shared.ref();
+    BOOST_LOG(info) << "videoThread: waiting for video ping (payload matches client session)..."sv;
     auto error = recv_ping(session, ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
     if (error < 0) {
+      BOOST_LOG(info) << "videoThread: recv_ping failed (timeout/error), aborting video thread"sv;
       return;
     }
+    BOOST_LOG(info) << "videoThread: video ping received, starting capture"sv;
 
     // Enable local prioritization and QoS tagging on video traffic if requested by the client
     auto address = session->video.peer.address();
@@ -2946,10 +2949,13 @@ namespace stream {
     while_starting_do_nothing(session->state);
 
     auto ref = broadcast_shared.ref();
+    BOOST_LOG(info) << "audioThread: waiting for audio ping..."sv;
     auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
     if (error < 0) {
+      BOOST_LOG(info) << "audioThread: recv_ping failed (timeout/error), aborting audio thread"sv;
       return;
     }
+    BOOST_LOG(info) << "audioThread: audio ping received"sv;
 
     // Enable local prioritization and QoS tagging on audio traffic if requested by the client
     auto address = session->audio.peer.address();
