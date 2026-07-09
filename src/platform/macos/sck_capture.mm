@@ -73,6 +73,13 @@ API_AVAILABLE(macos(12.3))
     return;
   }
 
+  // Guard against SCK delivering a sample during stream teardown/reconfig —
+  // CFRetain on an invalid sample crashes (EXC_BREAKPOINT).
+  if (!sampleBuffer || !CMSampleBufferIsValid(sampleBuffer)) {
+    dispatch_semaphore_signal(frameSignal_);
+    return;
+  }
+
   CMSampleBufferRef old = pendingSample_.exchange((CMSampleBufferRef) CFRetain(sampleBuffer));
   if (old) {
     CFRelease(old);
@@ -411,6 +418,14 @@ namespace platf {
     CMSampleBufferRef sample = [delegate_ consumeSample];
     if (!sample) {
       return capture_e::ok;  // spurious wake (e.g. didStopWithError)
+    }
+
+    // Validate the sample before retaining — SCK can deliver a sample that is
+    // being torn down if the stream is reconfiguring, and CFRetain on such an
+    // object crashes with EXC_BREAKPOINT (CFRetain.cold.2).
+    if (!CMSampleBufferIsValid(sample)) {
+      CFRelease(sample);
+      return capture_e::ok;
     }
 
     auto sample_guard = std::make_shared<av_sample_buf_t>(sample);
