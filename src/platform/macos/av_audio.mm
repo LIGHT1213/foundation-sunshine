@@ -46,6 +46,73 @@ namespace platf {
     return noErr;
   }
 
+  // Process a single AudioBufferList: convert/passthrough into the ring buffer.
+  // Returns true if data was written. Used for both input and output scopes.
+  static bool
+  processAudioBufferList(const AudioBufferList *bufList, AVAudioIOProcData *procData) {
+    if (!bufList || bufList->mNumberBuffers == 0) {
+      return false;
+    }
+
+    AudioBuffer buffer = bufList->mBuffers[0];
+    if (!buffer.mData || buffer.mDataByteSize == 0) {
+      return false;
+    }
+
+    UInt32 clientChannels = procData->clientRequestedChannels;
+    UInt32 deviceChannels = procData->aggregateDeviceChannels;
+    if (deviceChannels == 0) {
+      deviceChannels = clientChannels;
+    }
+    if (deviceChannels == 0) {
+      return false;
+    }
+
+    AVAudio *avAudio = procData->avAudio;
+    auto *inputSamples = static_cast<float *>(buffer.mData);
+    UInt32 inputFrames = buffer.mDataByteSize / (deviceChannels * sizeof(float));
+
+    if (procData->audioConverter) {
+      UInt32 maxOutputFrames = procData->conversionBufferSize / (clientChannels * sizeof(float));
+      UInt32 requestedOutputFrames = maxOutputFrames;
+
+      AudioConverterInputData inputData = { 0 };
+      inputData.inputData = inputSamples;
+      inputData.inputFrames = inputFrames;
+      inputData.framesProvided = 0;
+      inputData.deviceChannels = deviceChannels;
+      inputData.avAudio = avAudio;
+
+      AudioBufferList outputBufferList = { 0 };
+      outputBufferList.mNumberBuffers = 1;
+      outputBufferList.mBuffers[0].mNumberChannels = clientChannels;
+      outputBufferList.mBuffers[0].mDataByteSize = procData->conversionBufferSize;
+      outputBufferList.mBuffers[0].mData = procData->conversionBuffer;
+
+      UInt32 outputFrameCount = requestedOutputFrames;
+      OSStatus converterStatus = AudioConverterFillComplexBuffer(
+        procData->audioConverter,
+        audioConverterComplexInputProc,
+        &inputData,
+        &outputFrameCount,
+        &outputBufferList,
+        nullptr);
+
+      if (converterStatus == noErr && outputFrameCount > 0) {
+        UInt32 actualOutputBytes = outputFrameCount * clientChannels * sizeof(float);
+        TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, procData->conversionBuffer, actualOutputBytes);
+        return true;
+      }
+      // Fallback: write raw data
+      TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, buffer.mData, buffer.mDataByteSize);
+      return true;
+    }
+
+    // No conversion needed — direct passthrough
+    TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, buffer.mData, buffer.mDataByteSize);
+    return true;
+  }
+
   OSStatus
   systemAudioIOProc(AudioObjectID inDevice, const AudioTimeStamp *inNow, const AudioBufferList *inInputData, const AudioTimeStamp *inInputTime, AudioBufferList *outOutputData, const AudioTimeStamp *inOutputTime, void *inClientData) {
     auto *procData = static_cast<AVAudioIOProcData *>(inClientData);
@@ -54,57 +121,11 @@ namespace platf {
     UInt32 clientFrameSize = procData->clientRequestedFrameSize;
     AVAudio *avAudio = procData->avAudio;
 
-    bool didWriteData = false;
-
-    if (inInputData && inInputData->mNumberBuffers > 0) {
-      AudioBuffer inputBuffer = inInputData->mBuffers[0];
-
-      if (inputBuffer.mData && inputBuffer.mDataByteSize > 0) {
-        auto *inputSamples = static_cast<float *>(inputBuffer.mData);
-        UInt32 deviceChannels = procData->aggregateDeviceChannels;
-        UInt32 inputFrames = inputBuffer.mDataByteSize / (deviceChannels * sizeof(float));
-
-        if (procData->audioConverter) {
-          UInt32 maxOutputFrames = procData->conversionBufferSize / (clientChannels * sizeof(float));
-          UInt32 requestedOutputFrames = maxOutputFrames;
-
-          AudioConverterInputData inputData = { 0 };
-          inputData.inputData = inputSamples;
-          inputData.inputFrames = inputFrames;
-          inputData.framesProvided = 0;
-          inputData.deviceChannels = deviceChannels;
-          inputData.avAudio = avAudio;
-
-          AudioBufferList outputBufferList = { 0 };
-          outputBufferList.mNumberBuffers = 1;
-          outputBufferList.mBuffers[0].mNumberChannels = clientChannels;
-          outputBufferList.mBuffers[0].mDataByteSize = procData->conversionBufferSize;
-          outputBufferList.mBuffers[0].mData = procData->conversionBuffer;
-
-          UInt32 outputFrameCount = requestedOutputFrames;
-          OSStatus converterStatus = AudioConverterFillComplexBuffer(
-            procData->audioConverter,
-            audioConverterComplexInputProc,
-            &inputData,
-            &outputFrameCount,
-            &outputBufferList,
-            nullptr);
-
-          if (converterStatus == noErr && outputFrameCount > 0) {
-            UInt32 actualOutputBytes = outputFrameCount * clientChannels * sizeof(float);
-            TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, procData->conversionBuffer, actualOutputBytes);
-            didWriteData = true;
-          }
-          else {
-            TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, inputBuffer.mData, inputBuffer.mDataByteSize);
-            didWriteData = true;
-          }
-        }
-        else {
-          TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, inputBuffer.mData, inputBuffer.mDataByteSize);
-          didWriteData = true;
-        }
-      }
+    // Try input scope first (Core Audio Tap delivers here), then output scope
+    // (virtual loopback devices like BlackHole mirror output data here).
+    bool didWriteData = processAudioBufferList(inInputData, procData);
+    if (!didWriteData) {
+      didWriteData = processAudioBufferList(outOutputData, procData);
     }
 
     if (!didWriteData) {
@@ -291,7 +312,8 @@ namespace platf {
   }
   BOOST_LOG(debug) << "Device sample rate: "sv << deviceSampleRate << "Hz (requested "sv << sampleRate << "Hz)"sv;
 
-  UInt32 deviceChannels = channels;
+  UInt32 deviceChannels = 0;
+  // Query input scope first (BlackHole mirrors output to its input).
   AudioObjectPropertyAddress streamConfigAddr = {
     .mSelector = kAudioDevicePropertyStreamConfiguration,
     .mScope = kAudioDevicePropertyScopeInput,
@@ -308,6 +330,26 @@ namespace platf {
       }
       free(streamConfig);
     }
+  }
+  // If input scope returned 0 channels, try output scope (some virtual devices
+  // expose their format only on the output side).
+  if (deviceChannels == 0) {
+    streamConfigAddr.mScope = kAudioDevicePropertyScopeOutput;
+    streamConfigSize = 0;
+    AudioObjectGetPropertyDataSize(deviceID, &streamConfigAddr, 0, NULL, &streamConfigSize);
+    if (streamConfigSize > 0) {
+      AudioBufferList *streamConfig = (AudioBufferList *) malloc(streamConfigSize);
+      if (streamConfig) {
+        AudioObjectGetPropertyData(deviceID, &streamConfigAddr, 0, NULL, &streamConfigSize, streamConfig);
+        if (streamConfig->mNumberBuffers > 0) {
+          deviceChannels = streamConfig->mBuffers[0].mNumberChannels;
+        }
+        free(streamConfig);
+      }
+    }
+  }
+  if (deviceChannels == 0) {
+    deviceChannels = channels;  // final fallback
   }
   BOOST_LOG(debug) << "Device channels: "sv << deviceChannels << " (requested "sv << (int) channels << ")"sv;
 
