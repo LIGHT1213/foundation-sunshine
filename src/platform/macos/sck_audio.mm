@@ -16,8 +16,10 @@
 
 #include "src/logging.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <dispatch/dispatch.h>
 #include <mutex>
 
@@ -336,6 +338,28 @@ namespace platf {
     const UInt32 chans = asbd ? asbd->mChannelsPerFrame : abl->mNumberBuffers;
     const bool nonInterleaved = (!asbd || (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved)) && abl->mNumberBuffers > 1;
     const OSStatus nFrames = (OSStatus) CMSampleBufferGetNumSamples(sb);
+
+    // One-shot diagnostic: log the actual SCK audio format on the very first
+    // frame, plus a sample amplitude reading so we can tell silence from real
+    // audio vs. format mismatch.
+    static std::once_flag diag_once;
+    std::call_once(diag_once, [&]() {
+      float peak = 0.0f;
+      if (nFrames > 0 && abl->mNumberBuffers > 0 && abl->mBuffers[0].mData) {
+        const float *p = (const float *) abl->mBuffers[0].mData;
+        for (OSStatus i = 0; i < nFrames && i < 1024; ++i) {
+          peak = std::max(peak, std::fabs(p[i]));
+        }
+      }
+      BOOST_LOG(info) << "SCK audio format diag: nBuffers=" << abl->mNumberBuffers
+                      << " chans=" << chans
+                      << " nFrames=" << nFrames
+                      << " flags=0x" << std::hex << (asbd ? asbd->mFormatFlags : 0)
+                      << " bps=" << std::dec << (asbd ? asbd->mBitsPerChannel : 0)
+                      << " rate=" << (asbd ? asbd->mSampleRate : 0.0)
+                      << " nonInterleaved=" << (nonInterleaved ? 1 : 0)
+                      << " peak=" << peak;
+    });
 
     if (nonInterleaved && chans >= 2 && asbd && (asbd->mFormatFlags & kAudioFormatFlagIsFloat) && asbd->mBitsPerChannel == 32) {
       // Planar float32 -> interleaved float32, one frame at a time.
