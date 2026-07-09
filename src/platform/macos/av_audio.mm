@@ -68,13 +68,28 @@ namespace platf {
       return false;
     }
 
+    // Reject buffers whose reported channel count doesn't match the device's
+    // stream configuration — a mismatched buffer desyncs frame accounting and
+    // produces garbage. Also reject sub-frame fragments.
+    if (buffer.mNumberChannels != 0 && buffer.mNumberChannels != deviceChannels) {
+      return false;
+    }
+    UInt32 frameBytes = deviceChannels * sizeof(float);
+    if (buffer.mDataByteSize < frameBytes) {
+      return false;
+    }
+
     AVAudio *avAudio = procData->avAudio;
     auto *inputSamples = static_cast<float *>(buffer.mData);
-    UInt32 inputFrames = buffer.mDataByteSize / (deviceChannels * sizeof(float));
+    UInt32 inputFrames = buffer.mDataByteSize / frameBytes;
 
     if (procData->audioConverter) {
+      // Request the full conversion buffer capacity. Do NOT clamp to inputFrames:
+      // for up-conversion (e.g. 44.1k→48k) the converter needs fewer input frames
+      // than output frames, so clamping would discard the tail of every buffer.
+      // The converter's input callback returns 0 packets when input is exhausted,
+      // which correctly stops the conversion without overflow.
       UInt32 maxOutputFrames = procData->conversionBufferSize / (clientChannels * sizeof(float));
-      UInt32 requestedOutputFrames = maxOutputFrames;
 
       AudioConverterInputData inputData = { 0 };
       inputData.inputData = inputSamples;
@@ -89,7 +104,7 @@ namespace platf {
       outputBufferList.mBuffers[0].mDataByteSize = procData->conversionBufferSize;
       outputBufferList.mBuffers[0].mData = procData->conversionBuffer;
 
-      UInt32 outputFrameCount = requestedOutputFrames;
+      UInt32 outputFrameCount = maxOutputFrames;
       OSStatus converterStatus = AudioConverterFillComplexBuffer(
         procData->audioConverter,
         audioConverterComplexInputProc,
@@ -103,12 +118,12 @@ namespace platf {
         TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, procData->conversionBuffer, actualOutputBytes);
         return true;
       }
-      // Fallback: write raw data
-      TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, buffer.mData, buffer.mDataByteSize);
-      return true;
+      // Conversion failed — do NOT write raw deviceChannels data (would corrupt
+      // the consumer which expects clientChannels). Treat as no data.
+      return false;
     }
 
-    // No conversion needed — direct passthrough
+    // No conversion needed — direct passthrough (deviceChannels == clientChannels)
     TPCircularBufferProduceBytes(&avAudio->audioSampleBuffer, buffer.mData, buffer.mDataByteSize);
     return true;
   }
@@ -128,14 +143,39 @@ namespace platf {
       return noErr;
     }
 
-    // Try input scope first (Core Audio Tap delivers here), then output scope
-    // (virtual loopback devices like BlackHole mirror output data here).
-    bool didWriteData = processAudioBufferList(inInputData, procData);
-    if (!didWriteData) {
+    // Select the scope to read based on how capture was configured.
+    // - Core Audio Process Tap delivers captured audio on the INPUT scope.
+    // - BlackHole (virtual loopback) also delivers on the INPUT scope: apps
+    //   play into BlackHole's output, the driver mirrors it to its input stream,
+    //   and the IOProc receives it via inInputData. outOutputData is a buffer the
+    //   IOProc would WRITE to for playback — reading it back is wrong.
+    // captureFromOutputScope is therefore false for both paths; the fallback to
+    // the other scope exists only as a safety net for unusual device configs.
+    bool didWriteData = false;
+    if (procData->captureFromOutputScope) {
       didWriteData = processAudioBufferList(outOutputData, procData);
+      if (!didWriteData) {
+        didWriteData = processAudioBufferList(inInputData, procData);
+      }
+    }
+    else {
+      didWriteData = processAudioBufferList(inInputData, procData);
+      if (!didWriteData) {
+        didWriteData = processAudioBufferList(outOutputData, procData);
+      }
     }
 
+    // Real-time-safe diagnostic: write plain fields for the consumer thread to
+    // log. BOOST_LOG (string formatting, allocation, mutex) is forbidden on the
+    // audio IO thread — it causes priority inversion and dropouts.
+    procData->diagnosticCounter++;
+    procData->rtInputBytes = (inInputData && inInputData->mNumberBuffers > 0) ? inInputData->mBuffers[0].mDataByteSize : 0;
+    procData->rtOutputBytes = (outOutputData && outOutputData->mNumberBuffers > 0) ? outOutputData->mBuffers[0].mDataByteSize : 0;
+    procData->rtWroteData = didWriteData ? 1 : 0;
+
     if (!didWriteData) {
+      // No data on either scope — inject silence so the consumer's semaphore is
+      // always released and the stream keeps flowing (avoids a permanent stall).
       UInt32 silenceFrames = clientFrameSize > 0 ? std::min(clientFrameSize, 2048U) : 512U;
 
       if (procData->conversionBuffer && procData->conversionBufferSize > 0) {
@@ -291,6 +331,8 @@ namespace platf {
     return -1;
   }
 
+  self->ringBufferSampleRate = sampleRate;
+
   // Get device name for logging (CFString variant)
   AudioObjectPropertyAddress nameAddr = {
     .mSelector = kAudioDevicePropertyDeviceNameCFString,
@@ -377,6 +419,11 @@ namespace platf {
   self->ioProcData->audioConverter = NULL;
   self->ioProcData->conversionBuffer = NULL;
   self->ioProcData->conversionBufferSize = 0;
+  self->ioProcData->captureFromOutputScope = false;  // BlackHole delivers captured audio on INPUT scope (inInputData)
+  self->ioProcData->diagnosticCounter = 0;
+  self->ioProcData->rtInputBytes = 0;
+  self->ioProcData->rtOutputBytes = 0;
+  self->ioProcData->rtWroteData = 0;
 
   if (needsConversion) {
     AudioStreamBasicDescription sourceFormat = { 0 };
@@ -399,7 +446,11 @@ namespace platf {
     targetFormat.mChannelsPerFrame = channels;
     targetFormat.mBitsPerChannel = 32;
 
-    AudioConverterNew(&sourceFormat, &targetFormat, &self->ioProcData->audioConverter);
+    OSStatus converterStatus = AudioConverterNew(&sourceFormat, &targetFormat, &self->ioProcData->audioConverter);
+    if (converterStatus != noErr) {
+      BOOST_LOG(error) << "AudioConverterNew failed: "sv << ca::Status(converterStatus);
+      return -1;
+    }
   }
 
   // Pre-allocate conversion buffer
@@ -447,6 +498,8 @@ namespace platf {
   }
 
   BOOST_LOG(info) << "Setting up microphone: "sv << [[device localizedName] UTF8String] << " with "sv << sampleRate << "Hz"sv;
+
+  self->ringBufferSampleRate = sampleRate;
 
   self.audioCaptureSession = [[AVCaptureSession alloc] init];
 
@@ -527,6 +580,8 @@ namespace platf {
 - (int)setupSystemTap:(UInt32)sampleRate frameSize:(UInt32)frameSize channels:(UInt8)channels {
   using namespace std::literals;
   BOOST_LOG(info) << "Setting up Core Audio system tap: "sv << sampleRate << "Hz, "sv << (int) channels << "ch, frameSize="sv << frameSize;
+
+  self->ringBufferSampleRate = sampleRate;
 
   if ([self initializeSystemTapContext: sampleRate frameSize: frameSize channels: channels] != 0) {
     return -1;
@@ -624,8 +679,14 @@ namespace platf {
 - (void)initializeAudioBuffer:(UInt8)channels {
   TPCircularBufferCleanup(&self->audioSampleBuffer);
 
-  // 30ms buffer (6 packets of 240 samples)
-  int ringBufferSize = 6 * 240 * channels * sizeof(float);
+  // ~1 second of audio with headroom. The previous 30ms buffer (11KB) was far
+  // too small: the IOProc fires at the device buffer size (~512 frames) and can
+  // produce several buffers before the consumer wakes, overflowing the ring and
+  // silently dropping data (TPCircularBufferProduceBytes returns false on full).
+  // 1s gives the consumer ample slack without measurable added latency (the
+  // consumer drains to the live head, not the tail).
+  UInt32 rate = self->ringBufferSampleRate > 0 ? self->ringBufferSampleRate : 48000;
+  int ringBufferSize = (int) rate * channels * sizeof(float) * 2;
   TPCircularBufferInit(&self->audioSampleBuffer, ringBufferSize);
 
   if (self->audioSemaphore) {
@@ -680,9 +741,16 @@ namespace platf {
   self->ioProcData->clientRequestedChannels = channels;
   self->ioProcData->clientRequestedFrameSize = frameSize;
   self->ioProcData->clientRequestedSampleRate = sampleRate;
+  self->ioProcData->aggregateDeviceSampleRate = sampleRate;  // set before configureDevicePropertiesAndConverter overwrites
+  self->ioProcData->aggregateDeviceChannels = channels;  // set before configureDevicePropertiesAndConverter overwrites
   self->ioProcData->audioConverter = NULL;
   self->ioProcData->conversionBuffer = NULL;
   self->ioProcData->conversionBufferSize = 0;
+  self->ioProcData->captureFromOutputScope = false;  // Core Audio Tap delivers on input scope
+  self->ioProcData->diagnosticCounter = 0;
+  self->ioProcData->rtInputBytes = 0;
+  self->ioProcData->rtOutputBytes = 0;
+  self->ioProcData->rtWroteData = 0;
 
   return 0;
 }

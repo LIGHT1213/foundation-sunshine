@@ -3,6 +3,7 @@
  * @brief Definitions for audio capture and encoding.
  */
 // standard includes
+#include <cmath>
 #include <thread>
 
 // lib includes
@@ -561,6 +562,11 @@ namespace audio {
 
     int samples_per_frame = frame_size * stream.channelCount;
 
+    // Diagnostic: log the peak amplitude of the first 20 captured frames, then
+    // every 1000th frame, to confirm real audio (not silence) is flowing.
+    int frame_diag_counter = 0;
+    int timeout_diag_counter = 0;
+
     while (!shutdown_event->peek()) {
       std::vector<float> sample_buffer;
       sample_buffer.resize(samples_per_frame);
@@ -570,7 +576,16 @@ namespace audio {
         case platf::capture_e::ok:
           break;
         case platf::capture_e::timeout:
-          continue;
+          // Keep the encoder fed with silence so RTP timestamps advance and the
+          // client doesn't time out. Without this, a transient stall (e.g. the
+          // source momentarily silent) drops the whole frame and the client
+          // sees the stream go idle. Log the first few timeouts for diagnosis.
+          if (timeout_diag_counter < 5) {
+            timeout_diag_counter++;
+            BOOST_LOG(warning) << "Audio sample timeout #"sv << timeout_diag_counter
+                               << " — feeding silence to keep stream alive"sv;
+          }
+          break;
         case platf::capture_e::reinit:
           // Shutdown requested: don't rebuild the mic on the join critical path.
           // ~sck_system_audio_t() (stopCapture + drain) and init() (SCShareableContent +
@@ -597,6 +612,18 @@ namespace audio {
         default:
           BOOST_LOG(info) << "Audio capture: sample() returned fatal status " << (int) status << ", exiting loop"sv;
           return;
+      }
+
+      // Peak amplitude diagnostic for the first 20 frames + every 1000th.
+      frame_diag_counter++;
+      if (frame_diag_counter <= 20 || frame_diag_counter % 1000 == 0) {
+        float peak = 0.0f;
+        for (float s: sample_buffer) {
+          float a = std::fabs(s);
+          if (a > peak) peak = a;
+        }
+        BOOST_LOG(info) << "Audio frame #"sv << frame_diag_counter
+                        << " peak="sv << peak << " ("sv << samples_per_frame << " samples)"sv;
       }
 
       samples->raise(std::move(sample_buffer));

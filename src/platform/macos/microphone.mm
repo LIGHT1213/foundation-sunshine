@@ -27,6 +27,19 @@ namespace platf {
       const uint32_t neededBytes = static_cast<uint32_t>(sample_in.size() * sizeof(float));
       uint8_t *dst = reinterpret_cast<uint8_t *>(sample_in.data());
 
+      // Log the IOProc diagnostic snapshot (written by the RT IO thread) here,
+      // off the real-time audio thread. Only for the first few frames.
+      if (av_audio_capture->ioProcData && av_audio_capture->ioProcData->diagnosticCounter <= 10) {
+        UInt32 c = av_audio_capture->ioProcData->diagnosticCounter;
+        if (c > 0 && c <= 10) {
+          BOOST_LOG(info) << "IOProc snapshot #"sv << c
+                          << ": inBytes="sv << av_audio_capture->ioProcData->rtInputBytes
+                          << " outBytes="sv << av_audio_capture->ioProcData->rtOutputBytes
+                          << " wrote="sv << (av_audio_capture->ioProcData->rtWroteData ? "yes"sv : "no"sv)
+                          << " (scope="sv << (av_audio_capture->ioProcData->captureFromOutputScope ? "output-first"sv : "input-first"sv) << ")"sv;
+        }
+      }
+
       uint32_t remaining = neededBytes;
 
       while (remaining > 0) {

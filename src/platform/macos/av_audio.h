@@ -63,6 +63,15 @@ typedef struct {
   AudioConverterRef _Nullable audioConverter;  ///< Audio converter for format conversion
   float *_Nullable conversionBuffer;  ///< Pre-allocated buffer for audio conversion
   UInt32 conversionBufferSize;  ///< Size of the conversion buffer in bytes
+  bool captureFromOutputScope;  ///< True if the IOProc should read output scope first; false (default) reads input scope first. BlackHole and Core Audio Tap both deliver on input scope, so this is normally false.
+  UInt32 diagnosticCounter;  ///< Counts IOProc firings for first-N-frames diagnostic logging (0 = log next)
+  // Real-time-safe diagnostic snapshot: written by IOProc (single RT thread),
+  // read by the consumer thread for logging off the RT thread. Plain UInt32 is
+  // fine here (single writer, eventually-consistent reads are acceptable for
+  // diagnostics). Avoids BOOST_LOG in the RT IOProc callback.
+  UInt32 rtInputBytes;   ///< Last inInputData byte count seen by IOProc
+  UInt32 rtOutputBytes;  ///< Last outOutputData byte count seen by IOProc
+  UInt32 rtWroteData;    ///< 1 if last IOProc wrote data, 0 if silence-injected
 } AVAudioIOProcData;
 
 /**
@@ -72,13 +81,14 @@ typedef struct {
 @public
   TPCircularBuffer audioSampleBuffer;  ///< Shared circular buffer for both audio capture paths
   dispatch_semaphore_t audioSemaphore;  ///< Real-time safe semaphore for signaling audio sample availability
+  AVAudioIOProcData *_Nullable ioProcData;  ///< Context data for IOProc callbacks and format conversion (public for consumer-side diagnostics)
 @private
+  UInt32 ringBufferSampleRate;  ///< Client-requested sample rate (Hz), used for ring buffer sizing
   // System-wide audio tap components (Core Audio)
   AudioObjectID tapObjectID;  ///< Core Audio tap object identifier for system audio capture
   AudioObjectID captureDeviceID;  ///< Device used for IOProc (aggregate for Tap, or direct device for BlackHole)
   bool captureDeviceIsAggregate;  ///< True if captureDeviceID was created via AudioHardwareCreateAggregateDevice (must destroy on cleanup); false for a pre-existing device like BlackHole
   AudioDeviceIOProcID ioProcID;  ///< IOProc identifier for real-time audio processing
-  AVAudioIOProcData *_Nullable ioProcData;  ///< Context data for IOProc callbacks and format conversion
 }
 
 // AVFoundation microphone capture properties
