@@ -553,14 +553,19 @@ namespace audio {
     std::thread thread {encodeThread, samples, config, channel_data};
 
     auto fg = util::fail_guard([&]() {
+      BOOST_LOG(info) << "Audio capture: fail_guard firing (stopping samples queue)"sv;
       samples->stop();
+      BOOST_LOG(info) << "Audio capture: joining encode thread..."sv;
       thread.join();
+      BOOST_LOG(info) << "Audio capture: encode thread joined"sv;
 
       shutdown_event->view();
     });
 
     int samples_per_frame = frame_size * stream.channelCount;
 
+    BOOST_LOG(info) << "Audio capture: entering sampling loop (shutdown peek test: "
+                    << (shutdown_event->peek() ? "true" : "false") << ")"sv;
     while (!shutdown_event->peek()) {
       std::vector<float> sample_buffer;
       sample_buffer.resize(samples_per_frame);
@@ -570,6 +575,16 @@ namespace audio {
         case platf::capture_e::ok:
           break;
         case platf::capture_e::timeout:
+          // Diagnostic: log the first few timeouts to see if the loop is still
+          // spinning (and thus reachable) vs. wedged inside sample().
+          {
+            static thread_local int timeout_count = 0;
+            if (timeout_count < 3) {
+              BOOST_LOG(info) << "Audio capture: sample() timeout #" << (timeout_count + 1)
+                              << " (shutdown peek=" << (shutdown_event->peek() ? "true" : "false") << ")"sv;
+              timeout_count++;
+            }
+          }
           continue;
         case platf::capture_e::reinit:
           // Shutdown requested: don't rebuild the mic on the join critical path.
@@ -595,12 +610,13 @@ namespace audio {
           } while (!mic && !shutdown_event->view(5s));
           continue;
         default:
+          BOOST_LOG(info) << "Audio capture: sample() returned fatal status " << (int) status << ", exiting loop"sv;
           return;
       }
 
       samples->raise(std::move(sample_buffer));
     }
-    
+
     BOOST_LOG(info) << "Audio capture sampling loop ended (shutdown requested)";
   }
 
