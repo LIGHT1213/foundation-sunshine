@@ -2918,26 +2918,34 @@ namespace stream {
       session::stop(*session);
     });
 
-    while_starting_do_nothing(session->state);
+    try {
+      while_starting_do_nothing(session->state);
 
-    auto ref = broadcast_shared.ref();
-    BOOST_LOG(info) << "videoThread: waiting for video ping (payload matches client session)..."sv;
-    auto error = recv_ping(session, ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
-    if (error < 0) {
-      BOOST_LOG(info) << "videoThread: recv_ping failed (timeout/error), aborting video thread"sv;
-      return;
+      auto ref = broadcast_shared.ref();
+      BOOST_LOG(info) << "videoThread: waiting for video ping (payload matches client session)..."sv;
+      auto error = recv_ping(session, ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
+      if (error < 0) {
+        BOOST_LOG(info) << "videoThread: recv_ping failed (timeout/error), aborting video thread"sv;
+        return;
+      }
+      BOOST_LOG(info) << "videoThread: video ping received, starting capture"sv;
+
+      // Enable local prioritization and QoS tagging on video traffic if requested by the client
+      auto address = session->video.peer.address();
+      session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address,
+        session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
+
+      BOOST_LOG(debug) << "Start capturing Video"sv;
+      // Debug: Log the display_name before calling video::capture
+      BOOST_LOG(debug) << "stream.cpp: session->config.monitor.display_name = [" << (session->config.monitor.display_name.empty() ? "<empty>" : session->config.monitor.display_name) << "]";
+      video::capture(session->mail, session->config.monitor, session, session->video.dynamic_param_change_events);
     }
-    BOOST_LOG(info) << "videoThread: video ping received, starting capture"sv;
-
-    // Enable local prioritization and QoS tagging on video traffic if requested by the client
-    auto address = session->video.peer.address();
-    session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address,
-      session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
-
-    BOOST_LOG(debug) << "Start capturing Video"sv;
-    // Debug: Log the display_name before calling video::capture
-    BOOST_LOG(debug) << "stream.cpp: session->config.monitor.display_name = [" << (session->config.monitor.display_name.empty() ? "<empty>" : session->config.monitor.display_name) << "]";
-    video::capture(session->mail, session->config.monitor, session, session->video.dynamic_param_change_events);
+    catch (const std::exception &e) {
+      BOOST_LOG(error) << "videoThread: uncaught exception: "sv << e.what();
+    }
+    catch (...) {
+      BOOST_LOG(error) << "videoThread: unknown uncaught exception"sv;
+    }
   }
 
   void
@@ -2946,24 +2954,32 @@ namespace stream {
       session::stop(*session);
     });
 
-    while_starting_do_nothing(session->state);
+    try {
+      while_starting_do_nothing(session->state);
 
-    auto ref = broadcast_shared.ref();
-    BOOST_LOG(info) << "audioThread: waiting for audio ping..."sv;
-    auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
-    if (error < 0) {
-      BOOST_LOG(info) << "audioThread: recv_ping failed (timeout/error), aborting audio thread"sv;
-      return;
+      auto ref = broadcast_shared.ref();
+      BOOST_LOG(info) << "audioThread: waiting for audio ping..."sv;
+      auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
+      if (error < 0) {
+        BOOST_LOG(info) << "audioThread: recv_ping failed (timeout/error), aborting audio thread"sv;
+        return;
+      }
+      BOOST_LOG(info) << "audioThread: audio ping received"sv;
+
+      // Enable local prioritization and QoS tagging on audio traffic if requested by the client
+      auto address = session->audio.peer.address();
+      session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address,
+        session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
+
+      BOOST_LOG(debug) << "Start capturing Audio"sv;
+      audio::capture(session->mail, session->config.audio, session);
     }
-    BOOST_LOG(info) << "audioThread: audio ping received"sv;
-
-    // Enable local prioritization and QoS tagging on audio traffic if requested by the client
-    auto address = session->audio.peer.address();
-    session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address,
-      session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
-
-    BOOST_LOG(debug) << "Start capturing Audio"sv;
-    audio::capture(session->mail, session->config.audio, session);
+    catch (const std::exception &e) {
+      BOOST_LOG(error) << "audioThread: uncaught exception: "sv << e.what();
+    }
+    catch (...) {
+      BOOST_LOG(error) << "audioThread: unknown uncaught exception"sv;
+    }
   }
 
   namespace session {

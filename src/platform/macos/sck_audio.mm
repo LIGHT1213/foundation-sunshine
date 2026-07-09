@@ -42,6 +42,7 @@ API_AVAILABLE(macos(13.0))
   dispatch_semaphore_t frameSignal_;
   std::mutex sampleMu_;
   CMSampleBufferRef pendingSample_;  // +1 retained or NULL
+  std::atomic<bool> stopped_;        // set by didStopWithError
 }
 
 - (instancetype)init;
@@ -56,6 +57,7 @@ API_AVAILABLE(macos(13.0))
   if (self) {
     frameSignal_ = dispatch_semaphore_create(0);
     pendingSample_ = NULL;
+    stopped_ = false;
   }
   return self;
 }
@@ -83,6 +85,7 @@ API_AVAILABLE(macos(13.0))
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)err {
   const char *m = err.localizedDescription.UTF8String;
   BOOST_LOG(error) << "ScreenCaptureKit audio stream stopped: "sv << (m ? m : "unknown");
+  stopped_.store(true, std::memory_order_release);
   dispatch_semaphore_signal(frameSignal_);
 }
 
@@ -291,6 +294,13 @@ namespace platf {
     std::size_t have = 0;
 
     while (have < needed) {
+      // If the stream stopped (didStopWithError), request reinit so the caller
+      // tears down and recreates the SCStream instead of spinning on timeout.
+      if (delegate_->stopped_.load(std::memory_order_acquire)) {
+        BOOST_LOG(info) << "SCK audio: stream stopped, requesting reinit"sv;
+        return capture_e::reinit;
+      }
+
       // Drain any pending SCK sample buffer into the ring buffer.
       if (CMSampleBufferRef sb = [delegate_ takeSample]) {
         appendSampleBuffer(sb);

@@ -31,6 +31,12 @@ namespace platf {
   nv12_zero_device::convert(platf::img_t &img) {
     auto *av_img = (av_img_t *) &img;
 
+    // Guard against a frame whose pixel buffer is NULL (SCK delivered a valid
+    // sample with no image buffer during a transition). CFRetain(NULL) crashes.
+    if (!av_img->pixel_buffer || !av_img->pixel_buffer->buf) {
+      return -1;
+    }
+
     // Release any existing CVPixelBuffer previously retained for encoding
     av_buffer_unref(&av_frame->buf[0]);
 

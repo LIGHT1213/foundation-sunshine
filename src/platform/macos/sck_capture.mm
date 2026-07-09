@@ -432,6 +432,12 @@ namespace platf {
     CFRelease(sample);
     auto pixel_buffer = std::make_shared<av_pixel_buf_t>(sample_guard->buf);
 
+    // The sample may be valid (CMSampleBufferIsValid) but carry no image buffer
+    // during stream spinup/transitions — skip it and wait for the next frame.
+    if (!pixel_buffer->buf) {
+      return capture_e::ok;
+    }
+
     std::shared_ptr<img_t> img_out;
     if (!pull_free_image_cb(img_out)) {
       return capture_e::interrupted;
@@ -448,7 +454,7 @@ namespace platf {
     img_out->width = (int) CVPixelBufferGetWidth(pixel_buffer->buf);
     img_out->height = (int) CVPixelBufferGetHeight(pixel_buffer->buf);
     img_out->row_pitch = (int) CVPixelBufferGetBytesPerRow(pixel_buffer->buf);
-    img_out->pixel_pitch = img_out->row_pitch / img_out->width;
+    img_out->pixel_pitch = img_out->width > 0 ? img_out->row_pitch / img_out->width : 0;
 
     old_retainer = nullptr;
 
@@ -501,13 +507,17 @@ namespace platf {
       return -1;
     }
     CMSampleBufferRef sample = [delegate_ consumeSample];
-    if (!sample) {
+    if (!sample || !CMSampleBufferIsValid(sample)) {
+      if (sample) CFRelease(sample);
       return -1;
     }
 
     auto sample_guard = std::make_shared<av_sample_buf_t>(sample);
     CFRelease(sample);
     auto pixel_buffer = std::make_shared<av_pixel_buf_t>(sample_guard->buf);
+    if (!pixel_buffer->buf) {
+      return -1;
+    }
 
     auto av_img = (av_img_t *) img;
     auto old_retainer = std::make_shared<temp_retain_av_img_t>(
@@ -520,7 +530,7 @@ namespace platf {
     img->width = (int) CVPixelBufferGetWidth(pixel_buffer->buf);
     img->height = (int) CVPixelBufferGetHeight(pixel_buffer->buf);
     img->row_pitch = (int) CVPixelBufferGetBytesPerRow(pixel_buffer->buf);
-    img->pixel_pitch = img->row_pitch / img->width;
+    img->pixel_pitch = img->width > 0 ? img->row_pitch / img->width : 0;
     return 0;
   }
 
@@ -536,17 +546,24 @@ namespace platf {
       [stream_ stopCaptureWithCompletionHandler:^(NSError * _Nullable) {
         dispatch_semaphore_signal(stopSem);
       }];
-      dispatch_semaphore_wait(stopSem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+      bool stopped = (dispatch_semaphore_wait(stopSem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
       [stopSem release];
 
-      // Drain any callback already executing on the serial sample queue. We are
-      // on the capture/C++ thread, never on sampleQueue_, so this can't deadlock.
-      if (sampleQueue_) {
-        dispatch_sync(sampleQueue_, ^{});
+      if (stopped) {
+        // Drain any callback already executing on the serial sample queue. We are
+        // on the capture/C++ thread, never on sampleQueue_, so this can't deadlock.
+        if (sampleQueue_) {
+          dispatch_sync(sampleQueue_, ^{});
+        }
+        [stream_ release];
+        stream_ = nil;
       }
-
-      [stream_ release];
-      stream_ = nil;
+      else {
+        // stopCapture did not complete in 2s — SCK may still schedule callbacks.
+        // Leaking stream_/cfg_/delegate_/sampleQueue_ is safer than use-after-free.
+        BOOST_LOG(error) << "ScreenCaptureKit: stopCapture timed out; leaking stream to avoid UAF"sv;
+        return;
+      }
     }
     // Order matters: delegate_ and sampleQueue_ may still be referenced by a
     // callback drained above, so release them only AFTER the drain.
