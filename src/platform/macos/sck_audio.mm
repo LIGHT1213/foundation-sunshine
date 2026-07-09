@@ -294,8 +294,16 @@ namespace platf {
 
   void
   sck_system_audio_t::appendSampleBuffer(CMSampleBufferRef sb) {
-    // SCK delivers non-interleaved float32 PCM. Extract the AudioBufferList
-    // via the two-call pattern: first query the needed size, then fill.
+    // SCK delivers float32 PCM. The layout depends on the format flags:
+    //   - NonInterleaved (the common case): AudioBufferList has one
+    //     AudioBuffer per channel (mNumberBuffers == channels), each holding
+    //     a whole channel's samples: [L0 L1 ... Ln][R0 R1 ... Rn].
+    //   - Interleaved (rare): a single AudioBuffer with all channels
+    //     interleaved per frame: [L0 R0 L1 R1 ...].
+    // Downstream (TPCircularBuffer -> sample() -> Opus multistream) expects
+    // INTERLEAVED float32: [L0 R0 L1 R1 ...]. So for the non-interleaved case
+    // we must de-planarize here. The old code memcpy'd each channel buffer
+    // sequentially, producing [LLLL...RRRR...] which Opus decoded as garbage.
     size_t needed = 0;
     OSStatus st = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
       sb, &needed, nullptr, 0, nullptr, nullptr, 0, nullptr);
@@ -318,17 +326,45 @@ namespace platf {
       return;
     }
 
-    for (UInt32 b = 0; b < abl->mNumberBuffers; b++) {
-      const AudioBuffer &ab = abl->mBuffers[b];
-      if (!ab.mData || ab.mDataByteSize == 0) continue;
-      uint32_t available = 0;
-      void *dst = TPCircularBufferHead(&buf_, &available);
-      if (dst && available >= ab.mDataByteSize) {
-        memcpy(dst, ab.mData, ab.mDataByteSize);
-        TPCircularBufferProduce(&buf_, ab.mDataByteSize);
+    // Determine layout from the format description.
+    const AudioStreamBasicDescription *asbd = nullptr;
+    CMFormatDescriptionRef fmtDesc = CMSampleBufferGetFormatDescription(sb);
+    if (fmtDesc) {
+      asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc);
+    }
+    const UInt32 chans = asbd ? asbd->mChannelsPerFrame : abl->mNumberBuffers;
+    const bool nonInterleaved = (!asbd || (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved)) && abl->mNumberBuffers > 1;
+    const OSStatus nFrames = (OSStatus) CMSampleBufferGetNumSamples(sb);
+
+    if (nonInterleaved && chans >= 2 && asbd && (asbd->mFormatFlags & kAudioFormatFlagIsFloat) && asbd->mBitsPerChannel == 32) {
+      // Planar float32 -> interleaved float32, one frame at a time.
+      for (OSStatus n = 0; n < nFrames; ++n) {
+        uint32_t available = 0;
+        float *dst = (float *) TPCircularBufferHead(&buf_, &available);
+        if (!dst || available < chans * (uint32_t) sizeof(float)) {
+          break;  // ring full, drop the rest of this sample buffer
+        }
+        for (UInt32 c = 0; c < chans; ++c) {
+          const float *src = (const float *) abl->mBuffers[c].mData;
+          dst[c] = src[n];
+        }
+        TPCircularBufferProduce(&buf_, chans * (uint32_t) sizeof(float));
       }
-      else {
-        break;  // ring full, drop the rest of this buffer
+    }
+    else {
+      // Already interleaved (single buffer) or unusual layout: copy as-is.
+      for (UInt32 b = 0; b < abl->mNumberBuffers; b++) {
+        const AudioBuffer &ab = abl->mBuffers[b];
+        if (!ab.mData || ab.mDataByteSize == 0) continue;
+        uint32_t available = 0;
+        void *dst = TPCircularBufferHead(&buf_, &available);
+        if (dst && available >= ab.mDataByteSize) {
+          memcpy(dst, ab.mData, ab.mDataByteSize);
+          TPCircularBufferProduce(&buf_, ab.mDataByteSize);
+        }
+        else {
+          break;  // ring full, drop the rest of this buffer
+        }
       }
     }
     CFRelease(retainedBB);

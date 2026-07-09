@@ -122,6 +122,12 @@ namespace safe {
 
     bool
     peek() {
+      // Must take the lock: _continue / _status are written under _lock by
+      // raise()/stop(). A lock-free read here is a data race and, on ARM64,
+      // lets callers (e.g. the audio sampling loop) observe a stale "not yet
+      // raised" value indefinitely after shutdown is signalled — which wedges
+      // session::join past its 10s hang deadline.
+      std::lock_guard lg { _lock };
       return _continue && (bool) _status;
     }
 
