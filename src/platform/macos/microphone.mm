@@ -113,8 +113,20 @@ namespace platf {
       BOOST_LOG(info) << "Audio: selecting capture method (sink='"sv << (config::audio.sink.empty() ? "(none)"sv : config::audio.sink)
                       << "', hostAudio="sv << (hostAudio ? "yes"sv : "no"sv) << ")"sv;
 
-      // Path 1: Core Audio Process Tap (macOS 14.0+) — preferred, native, no driver needed
+      // Determine macOS major version for capture-path selection.
+      // macOS 26 (Tahoe) broke both BlackHole (CoreAudio stack change) and
+      // Process Tap (AudioDeviceCreateIOProcID hangs indefinitely on aggregate
+      // devices). On macOS 26+, ScreenCaptureKit is the only working path.
+      NSOperatingSystemVersion osVer = [[NSProcessInfo processInfo] operatingSystemVersion];
+      bool isTahoeOrLater = osVer.majorVersion >= 26;
+
+      // Path 1: On macOS 14-25, try Core Audio Process Tap first (native, no driver).
+      // On macOS 26+, skip it — AudioDeviceCreateIOProcID hangs (confirmed OS bug).
+      bool tapAvailable = false;
       if (@available(macOS 14.0, *)) {
+        tapAvailable = true;
+      }
+      if (!isTahoeOrLater && tapAvailable) {
         BOOST_LOG(info) << "Trying Core Audio Process Tap (native system audio capture)..."sv;
         auto mic = std::make_unique<av_mic_t>();
         mic->av_audio_capture = [[AVAudio alloc] init];
@@ -123,7 +135,28 @@ namespace platf {
           BOOST_LOG(info) << "Core Audio Process Tap started successfully"sv;
           return mic;
         }
-        BOOST_LOG(warning) << "Core Audio Process Tap failed (may need 'System Audio Recording' permission in System Settings → Privacy & Security)"sv;
+        BOOST_LOG(warning) << "Core Audio Process Tap failed"sv;
+      }
+      else if (isTahoeOrLater) {
+        BOOST_LOG(info) << "macOS 26+ detected — skipping Process Tap (AudioDeviceCreateIOProcID hangs) and BlackHole (loopback broken). Using ScreenCaptureKit audio."sv;
+      }
+
+      // Path 2: On macOS 26+, ScreenCaptureKit audio is the primary path.
+      // SCK captures system audio via a different API stack that doesn't depend
+      // on the broken HAL Process Tap or BlackHole driver. Requires Screen
+      // Recording TCC permission (same as video capture).
+      bool sckAvailable = false;
+      if (@available(macOS 13.0, *)) {
+        sckAvailable = true;
+      }
+      if (isTahoeOrLater || sckAvailable) {
+        BOOST_LOG(info) << "Trying ScreenCaptureKit audio capture..."sv;
+        auto sck = make_sck_system_audio(channels, sample_rate, frame_size);
+        if (sck) {
+          BOOST_LOG(info) << "ScreenCaptureKit audio capture started successfully"sv;
+          return sck;
+        }
+        BOOST_LOG(warning) << "ScreenCaptureKit audio capture failed (may need Screen Recording permission)"sv;
       }
 
       // Path 2: If user configured an explicit sink, try that device (BlackHole, mic, etc.)
@@ -164,33 +197,31 @@ namespace platf {
         return mic;
       }
 
-      // Path 3: Auto-detect BlackHole (fallback for pre-macOS 14 or if Tap failed)
-      // Note: On macOS 26 (Tahoe), BlackHole loopback is broken — IOProc fires
-      // but delivers all-zeros. The Tap path above should succeed instead.
-      BOOST_LOG(info) << "Scanning for BlackHole virtual device (fallback)..."sv;
-      NSArray<NSString *> *blackholeNames = @[@"BlackHole 2ch", @"BlackHole 16ch", @"BlackHole 64ch", @"BlackHole 128ch", @"BlackHole"];
-      for (NSString *bwName in blackholeNames) {
-        AudioObjectID devID = [AVAudio findInputDeviceByName:bwName];
-        if (devID != kAudioObjectUnknown) {
-          BOOST_LOG(info) << "Found virtual audio device: "sv << [bwName UTF8String] << " — using for system audio capture"sv;
-          auto mic = std::make_unique<av_mic_t>();
-          mic->av_audio_capture = [[AVAudio alloc] init];
-          mic->av_audio_capture.hostAudioEnabled = hostAudio;
-          if ([mic->av_audio_capture setupDeviceCapture:devID sampleRate:sample_rate frameSize:frame_size channels:channels] == 0) {
-            return mic;
+      // Path 3 (macOS < 14 only): Auto-detect BlackHole as a fallback.
+      // On macOS 14+ the Process Tap and SCK paths above are preferred.
+      // On macOS 26+ BlackHole is broken (CoreAudio stack change).
+      if (!isTahoeOrLater) {
+        BOOST_LOG(info) << "Scanning for BlackHole virtual device (fallback)..."sv;
+        NSArray<NSString *> *blackholeNames = @[@"BlackHole 2ch", @"BlackHole 16ch", @"BlackHole 64ch", @"BlackHole 128ch", @"BlackHole"];
+        for (NSString *bwName in blackholeNames) {
+          AudioObjectID devID = [AVAudio findInputDeviceByName:bwName];
+          if (devID != kAudioObjectUnknown) {
+            BOOST_LOG(info) << "Found virtual audio device: "sv << [bwName UTF8String] << " — using for system audio capture"sv;
+            auto mic = std::make_unique<av_mic_t>();
+            mic->av_audio_capture = [[AVAudio alloc] init];
+            mic->av_audio_capture.hostAudioEnabled = hostAudio;
+            if ([mic->av_audio_capture setupDeviceCapture:devID sampleRate:sample_rate frameSize:frame_size channels:channels] == 0) {
+              return mic;
+            }
+            BOOST_LOG(warning) << "Failed to capture from "sv << [bwName UTF8String] << ", trying next option."sv;
           }
-          BOOST_LOG(warning) << "Failed to capture from "sv << [bwName UTF8String] << ", trying next option."sv;
         }
       }
 
-      // Path 4: ScreenCaptureKit audio (last resort)
-      auto sck = make_sck_system_audio(channels, sample_rate, frame_size);
-      if (sck) {
-        return sck;
+      BOOST_LOG(error) << "All audio capture methods failed."sv;
+      if (isTahoeOrLater) {
+        BOOST_LOG(error) << "On macOS 26+, grant 'Screen Recording' permission in System Settings → Privacy & Security (ScreenCaptureKit audio needs it)."sv;
       }
-
-      BOOST_LOG(error) << "All audio capture methods failed."sv
-                       << " On macOS 14+, grant 'System Audio Recording' permission in System Settings → Privacy & Security."sv;
       return nullptr;
     }
 
