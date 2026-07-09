@@ -2973,7 +2973,6 @@ namespace stream {
 
       BOOST_LOG(debug) << "Start capturing Audio"sv;
       audio::capture(session->mail, session->config.audio, session);
-      BOOST_LOG(info) << "audioThread: audio::capture() returned"sv;
     }
     catch (const std::exception &e) {
       BOOST_LOG(error) << "audioThread: uncaught exception: "sv << e.what();

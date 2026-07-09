@@ -1265,6 +1265,31 @@ namespace rtsp_stream {
         config.encryptionFlagsEnabled |= SS_ENC_AUDIO;
       }
 
+      // Reconcile the client-reported encryption flags with what the server
+      // actually requested. Some Moonlight clients echo back all *supported*
+      // encryption flags (including AUDIO/MIC) as "enabled" even when the
+      // server's encryptionRequested only asked for CONTROL_V2. If we honor
+      // the client's flags verbatim we encrypt audio the client can't decrypt,
+      // producing silent playback. Mask off any stream-encryption flags the
+      // server didn't request. CONTROL_V2 is always kept (it's mandatory).
+      {
+        auto encryption_mode = net::encryption_mode_for_address(sock.remote_endpoint().address());
+        uint32_t server_requested = SS_ENC_CONTROL_V2;
+        if (encryption_mode != config::ENCRYPTION_MODE_NEVER) {
+          server_requested |= SS_ENC_AUDIO | SS_ENC_MIC;
+          if (encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
+            server_requested |= SS_ENC_VIDEO;
+          }
+        }
+        uint32_t before = config.encryptionFlagsEnabled;
+        config.encryptionFlagsEnabled &= server_requested;
+        if (config.encryptionFlagsEnabled != before) {
+          BOOST_LOG(info) << "RTSP: masked client encryption flags 0x"sv << std::hex << before
+                          << " to 0x"sv << config.encryptionFlagsEnabled << std::dec
+                          << " (server only requested 0x"sv << std::hex << server_requested << std::dec << ")"sv;
+        }
+      }
+
       auto &monitor = config.monitor;
       monitor.height = getArg("x-nv-video[0].clientViewportHt"sv);
       monitor.width = getArg("x-nv-video[0].clientViewportWd"sv);
