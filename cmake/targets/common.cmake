@@ -14,6 +14,19 @@ elseif(UNIX)
 
     if(APPLE)
         include(${CMAKE_MODULE_PATH}/targets/macos.cmake)
+
+        # Create a .app bundle target that gives Sunshine a stable TCC identity.
+        # Running as a .app bundle (via `open build/Sunshine.app` or double-click)
+        # gives it its own TCC identity (com.alkaidlab.sunshine) independent of
+        # which terminal launched it. This is critical for audio capture: SCK
+        # needs Screen Recording permission, and a bare binary's TCC identity
+        # changes every rebuild (filename includes timestamp).
+        add_custom_target(sunshine-app
+                DEPENDS sunshine
+                COMMAND ${CMAKE_SOURCE_DIR}/scripts/macos_create_app_bundle.sh
+                        ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}
+                COMMENT "Creating Sunshine.app bundle with stable TCC identity"
+                VERBATIM)
     else()
         include(${CMAKE_MODULE_PATH}/targets/linux.cmake)
     endif()

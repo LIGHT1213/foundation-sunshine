@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.alkaidlab.sunshine</string>
+  <key>CFBundleName</key>
+  <string>Sunshine</string>
+  <key>CFBundleDisplayName</key>
+  <string>Foundation Sunshine</string>
+  <key>CFBundleExecutable</key>
+  <string>Sunshine</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>@SUNSHINE_VERSION@</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@SUNSHINE_VERSION@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LSBackgroundOnly</key>
+  <false/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Sunshine needs microphone access to stream audio to Moonlight clients.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Sunshine needs to capture system audio to stream sound to your Moonlight client.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Sunshine needs screen recording permission to capture your display for streaming.</string>
+</dict>
+</plist>
