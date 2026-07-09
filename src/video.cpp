@@ -2887,6 +2887,7 @@ namespace video {
                          << "), aborting capture thread"sv;
         return;
       }
+      BOOST_LOG(info) << "encode_run: dummy image ready, entering encode loop"sv;
     }
 
     while (true) {
@@ -3486,6 +3487,7 @@ namespace video {
 
       auto &encoder = *chosen_encoder;
 
+      BOOST_LOG(info) << "capture_async: about to make_encode_device for "sv << encoder.name;
       auto encode_device = make_encode_device(*display, encoder, config);
       if (!encode_device) {
         BOOST_LOG(error) << "capture_async: make_encode_device returned null for "
@@ -3509,6 +3511,7 @@ namespace video {
       }
       hdr_event->raise(std::move(hdr_info));
 
+      BOOST_LOG(info) << "capture_async: calling encode_run (encoder="sv << encoder.name << ")"sv;
       encode_run(
         frame_nr,
         mail, images,
@@ -3516,6 +3519,7 @@ namespace video {
         std::move(encode_device),
         ref->reinit_event, *ref->encoder_p,
         channel_data, dynamic_param_events);
+      BOOST_LOG(info) << "capture_async: encode_run returned, looping"sv;
     }
   }
 
