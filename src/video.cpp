@@ -1754,10 +1754,20 @@ namespace video {
           continue;
         }
         case platf::capture_e::error:
+          return;
         case platf::capture_e::ok:
+          // On backends whose capture() returns one frame per call (macOS
+          // ScreenCaptureKit / AVFoundation), ok is the NORMAL per-frame
+          // return, not a terminal status. Loop back and capture the next
+          // frame. (Windows' capture() contains its own internal while(true)
+          // and never returns ok during streaming, so this is a no-op there.)
+          continue;
         case platf::capture_e::timeout:
         case platf::capture_e::interrupted:
-          return;
+          // Transient: spurious semaphore wake, momentary image-pool fullness,
+          // or a brief frame drought. Keep capturing unless the queue itself
+          // is stopping (checked by the outer while loop).
+          continue;
         default:
           BOOST_LOG(error) << "Unrecognized capture status ["sv << (int) status << ']';
           return;
