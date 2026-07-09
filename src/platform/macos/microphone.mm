@@ -161,10 +161,19 @@ namespace platf {
           BOOST_LOG(info) << "ScreenCaptureKit audio capture started successfully"sv;
           return sck;
         }
-        BOOST_LOG(warning) << "ScreenCaptureKit audio capture failed (may need Screen Recording permission)"sv;
+        if (isTahoeOrLater) {
+          BOOST_LOG(error) << "ScreenCaptureKit audio failed on macOS 26+."sv
+                           << " This is the ONLY working audio path on Tahoe."sv
+                           << " Grant 'Screen Recording' permission to your terminal in"sv
+                           << " System Settings → Privacy & Security → Screen Recording."sv;
+        }
+        else {
+          BOOST_LOG(warning) << "ScreenCaptureKit audio capture failed (may need Screen Recording permission)"sv;
+        }
       }
 
-      // Path 2: If user configured an explicit sink, try that device (BlackHole, mic, etc.)
+      // Path 3: If user configured an explicit sink, try that device (BlackHole, mic, etc.)
+      // On macOS 26+ this path is only reached if SCK failed (e.g. no Screen Recording perm).
       if (!config::audio.sink.empty()) {
         const char *audio_sink = config::audio.sink.c_str();
         BOOST_LOG(info) << "Trying configured audio sink: "sv << audio_sink;
