@@ -2978,6 +2978,7 @@ namespace stream {
         return;
       }
 
+      BOOST_LOG(info) << "session::stop invoked — raising shutdown (caller is the control/video/audio thread)"sv;
       session.shutdown_event->raise(true);
     }
 

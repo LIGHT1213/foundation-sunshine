@@ -2871,6 +2871,8 @@ namespace video {
       // in a separate scope.
       auto dummy_img = disp->alloc_img();
       if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
+        BOOST_LOG(error) << "encode_run: dummy image setup failed (alloc="sv << (bool) dummy_img
+                         << "), aborting capture thread"sv;
         return;
       }
     }
@@ -3324,6 +3326,7 @@ namespace video {
 
     auto images = std::make_shared<img_event_t::element_type>();
     auto lg = util::fail_guard([&]() {
+      BOOST_LOG(info) << "capture_async exiting: stopping images and raising session shutdown"sv;
       images->stop();
       shutdown_event->raise(true);
     });
@@ -3473,6 +3476,9 @@ namespace video {
 
       auto encode_device = make_encode_device(*display, encoder, config);
       if (!encode_device) {
+        BOOST_LOG(error) << "capture_async: make_encode_device returned null for "
+                         << display->width << "x"sv << display->height
+                         << " (encoder="sv << encoder.name << ")"sv;
         return;
       }
 
