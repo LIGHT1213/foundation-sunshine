@@ -75,14 +75,15 @@ typedef struct {
 @private
   // System-wide audio tap components (Core Audio)
   AudioObjectID tapObjectID;  ///< Core Audio tap object identifier for system audio capture
-  AudioObjectID aggregateDeviceID;  ///< Aggregate device ID for system tap audio routing
+  AudioObjectID captureDeviceID;  ///< Device used for IOProc (aggregate for Tap, or direct device for BlackHole)
+  bool captureDeviceIsAggregate;  ///< True if captureDeviceID was created via AudioHardwareCreateAggregateDevice (must destroy on cleanup); false for a pre-existing device like BlackHole
   AudioDeviceIOProcID ioProcID;  ///< IOProc identifier for real-time audio processing
   AVAudioIOProcData *_Nullable ioProcData;  ///< Context data for IOProc callbacks and format conversion
 }
 
 // AVFoundation microphone capture properties
-@property (nonatomic, assign, nullable) AVCaptureSession *audioCaptureSession;
-@property (nonatomic, assign, nullable) AVCaptureConnection *audioConnection;
+@property (nonatomic, strong, nullable) AVCaptureSession *audioCaptureSession;
+@property (nonatomic, strong, nullable) AVCaptureConnection *audioConnection;
 @property (nonatomic, assign) BOOL hostAudioEnabled;  ///< Whether host audio playback should be enabled
 
 + (NSArray<AVCaptureDevice *> *)microphones;

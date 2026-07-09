@@ -116,10 +116,17 @@ namespace platf {
   OSStatus
   systemAudioIOProc(AudioObjectID inDevice, const AudioTimeStamp *inNow, const AudioBufferList *inInputData, const AudioTimeStamp *inInputTime, AudioBufferList *outOutputData, const AudioTimeStamp *inOutputTime, void *inClientData) {
     auto *procData = static_cast<AVAudioIOProcData *>(inClientData);
+    if (!procData || !procData->avAudio) {
+      return noErr;
+    }
 
     UInt32 clientChannels = procData->clientRequestedChannels;
     UInt32 clientFrameSize = procData->clientRequestedFrameSize;
     AVAudio *avAudio = procData->avAudio;
+    if (clientChannels == 0) {
+      // Invalid configuration; avoid divide-by-zero in silence path.
+      return noErr;
+    }
 
     // Try input scope first (Core Audio Tap delivers here), then output scope
     // (virtual loopback devices like BlackHole mirror output data here).
@@ -399,12 +406,17 @@ namespace platf {
   UInt32 maxFrames = frameSize * 8;
   self->ioProcData->conversionBufferSize = maxFrames * channels * sizeof(float);
   self->ioProcData->conversionBuffer = (float *) malloc(self->ioProcData->conversionBufferSize);
+  if (!self->ioProcData->conversionBuffer) {
+    BOOST_LOG(error) << "Failed to allocate conversion buffer"sv;
+    return -1;
+  }
 
   // Initialize the ring buffer + semaphore
   [self initializeAudioBuffer: channels];
 
   // Create and start the IOProc on this device
-  self->aggregateDeviceID = deviceID;  // reuse the IOProc path; systemAudioIOProc reads from aggregateDeviceID
+  self->captureDeviceID = deviceID;  // IOProc registered on this device
+  self->captureDeviceIsAggregate = false;  // BlackHole is a pre-existing device, NOT an aggregate — do not destroy it
   self->tapObjectID = kAudioObjectUnknown;
   self->ioProcID = NULL;
 
@@ -495,13 +507,20 @@ namespace platf {
          fromConnection:(AVCaptureConnection *)connection {
   if (connection == self.audioConnection) {
     AudioBufferList audioBufferList;
-    CMBlockBufferRef blockBuffer;
+    CMBlockBufferRef blockBuffer = NULL;
 
-    CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sampleBuffer, NULL, &audioBufferList, sizeof(audioBufferList), NULL, NULL, 0, &blockBuffer);
+    OSStatus st = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sampleBuffer, NULL, &audioBufferList, sizeof(audioBufferList), NULL, NULL, 0, &blockBuffer);
+    if (st != noErr || audioBufferList.mNumberBuffers == 0 || !blockBuffer) {
+      if (blockBuffer) CFRelease(blockBuffer);
+      return;
+    }
 
     AudioBuffer audioBuffer = audioBufferList.mBuffers[0];
-    TPCircularBufferProduceBytes(&self->audioSampleBuffer, audioBuffer.mData, audioBuffer.mDataByteSize);
-    dispatch_semaphore_signal(self->audioSemaphore);
+    if (audioBuffer.mData && audioBuffer.mDataByteSize > 0) {
+      TPCircularBufferProduceBytes(&self->audioSampleBuffer, audioBuffer.mData, audioBuffer.mDataByteSize);
+      dispatch_semaphore_signal(self->audioSemaphore);
+    }
+    CFRelease(blockBuffer);  // ProduceBytes copies data, safe to release
   }
 }
 
@@ -563,16 +582,21 @@ namespace platf {
 - (void)cleanupSystemTapContext:(id)tapDescription {
   using namespace std::literals;
 
-  if (self->ioProcID && self->aggregateDeviceID != kAudioObjectUnknown) {
-    AudioDeviceStop(self->aggregateDeviceID, self->ioProcID);
-    AudioDeviceDestroyIOProcID(self->aggregateDeviceID, self->ioProcID);
+  if (self->ioProcID && self->captureDeviceID != kAudioObjectUnknown) {
+    AudioDeviceStop(self->captureDeviceID, self->ioProcID);
+    AudioDeviceDestroyIOProcID(self->captureDeviceID, self->ioProcID);
     self->ioProcID = NULL;
   }
 
-  if (self->aggregateDeviceID != kAudioObjectUnknown) {
-    AudioHardwareDestroyAggregateDevice(self->aggregateDeviceID);
-    self->aggregateDeviceID = kAudioObjectUnknown;
+  // Only destroy the aggregate device if we created it (Tap path).
+  // For BlackHole/device-capture path, captureDeviceID is a pre-existing system
+  // device — calling AudioHardwareDestroyAggregateDevice on it would corrupt
+  // Core Audio state and may crash.
+  if (self->captureDeviceIsAggregate && self->captureDeviceID != kAudioObjectUnknown) {
+    AudioHardwareDestroyAggregateDevice(self->captureDeviceID);
   }
+  self->captureDeviceID = kAudioObjectUnknown;
+  self->captureDeviceIsAggregate = false;
 
   if (self->tapObjectID != kAudioObjectUnknown) {
     AudioHardwareDestroyProcessTap(self->tapObjectID);
@@ -643,7 +667,8 @@ namespace platf {
   }
 
   self->tapObjectID = kAudioObjectUnknown;
-  self->aggregateDeviceID = kAudioObjectUnknown;
+  self->captureDeviceID = kAudioObjectUnknown;
+  self->captureDeviceIsAggregate = false;
   self->ioProcID = NULL;
 
   self->ioProcData = (AVAudioIOProcData *) malloc(sizeof(AVAudioIOProcData));
@@ -724,20 +749,21 @@ namespace platf {
     @kAudioAggregateDeviceIsPrivateKey: std::getenv("SUNSHINE_PUBLIC_AUDIO_TAP") ? @NO : @YES,
   };
 
-  OSStatus status = AudioHardwareCreateAggregateDevice((CFDictionaryRef) aggregateProperties, &self->aggregateDeviceID);
+  OSStatus status = AudioHardwareCreateAggregateDevice((CFDictionaryRef) aggregateProperties, &self->captureDeviceID);
   if (status != noErr && status != 'ExtA') {
     BOOST_LOG(error) << "AudioHardwareCreateAggregateDevice failed: "sv << ca::Status(status);
     return status;
   }
+  self->captureDeviceIsAggregate = true;  // Mark for cleanup — must destroy this aggregate on teardown
 
-  if (self->aggregateDeviceID != kAudioObjectUnknown) {
+  if (self->captureDeviceID != kAudioObjectUnknown) {
     AudioObjectPropertyAddress sampleRateAddr = {
       .mSelector = kAudioDevicePropertyNominalSampleRate,
       .mScope = kAudioObjectPropertyScopeGlobal,
       .mElement = kAudioObjectPropertyElementMain
     };
     Float64 deviceSampleRate = (Float64) sampleRate;
-    AudioObjectSetPropertyData(self->aggregateDeviceID, &sampleRateAddr, 0, NULL, sizeof(Float64), &deviceSampleRate);
+    AudioObjectSetPropertyData(self->captureDeviceID, &sampleRateAddr, 0, NULL, sizeof(Float64), &deviceSampleRate);
 
     AudioObjectPropertyAddress bufferSizeAddr = {
       .mSelector = kAudioDevicePropertyBufferFrameSize,
@@ -745,7 +771,7 @@ namespace platf {
       .mElement = kAudioObjectPropertyElementMain
     };
     UInt32 deviceFrameSize = frameSize;
-    AudioObjectSetPropertyData(self->aggregateDeviceID, &bufferSizeAddr, 0, NULL, sizeof(UInt32), &deviceFrameSize);
+    AudioObjectSetPropertyData(self->captureDeviceID, &bufferSizeAddr, 0, NULL, sizeof(UInt32), &deviceFrameSize);
   }
 
   return noErr;
@@ -759,7 +785,7 @@ namespace platf {
   UInt32 aggregateDeviceChannels = clientChannels;
 
   UInt32 sampleRateQuerySize = sizeof(Float64);
-  OSStatus sampleRateStatus = [self getDeviceProperty: self->aggregateDeviceID
+  OSStatus sampleRateStatus = [self getDeviceProperty: self->captureDeviceID
                                             selector: kAudioDevicePropertyNominalSampleRate
                                                scope: kAudioObjectPropertyScopeGlobal
                                              element: kAudioObjectPropertyElementMain
@@ -776,12 +802,12 @@ namespace platf {
   };
 
   UInt32 streamConfigSize = 0;
-  OSStatus scStat = AudioObjectGetPropertyDataSize(self->aggregateDeviceID, &streamConfigAddr, 0, NULL, &streamConfigSize);
+  OSStatus scStat = AudioObjectGetPropertyDataSize(self->captureDeviceID, &streamConfigAddr, 0, NULL, &streamConfigSize);
 
   if (scStat == noErr && streamConfigSize > 0) {
     AudioBufferList *streamConfig = (AudioBufferList *) malloc(streamConfigSize);
     if (streamConfig) {
-      AudioObjectGetPropertyData(self->aggregateDeviceID, &streamConfigAddr, 0, NULL, &streamConfigSize, streamConfig);
+      AudioObjectGetPropertyData(self->captureDeviceID, &streamConfigAddr, 0, NULL, &streamConfigSize, streamConfig);
       if (streamConfig->mNumberBuffers > 0) {
         aggregateDeviceChannels = streamConfig->mBuffers[0].mNumberChannels;
       }
@@ -840,16 +866,16 @@ namespace platf {
 - (OSStatus)createAndStartAggregateDeviceIOProc:(CATapDescription *)tapDescription {
   using namespace std::literals;
 
-  OSStatus status = AudioDeviceCreateIOProcID(self->aggregateDeviceID, platf::systemAudioIOProc, self->ioProcData, &self->ioProcID);
+  OSStatus status = AudioDeviceCreateIOProcID(self->captureDeviceID, platf::systemAudioIOProc, self->ioProcData, &self->ioProcID);
   if (status != kAudioHardwareNoError) {
     BOOST_LOG(error) << "AudioDeviceCreateIOProcID failed: "sv << ca::Status(status);
     return status;
   }
 
-  status = AudioDeviceStart(self->aggregateDeviceID, self->ioProcID);
+  status = AudioDeviceStart(self->captureDeviceID, self->ioProcID);
   if (status != kAudioHardwareNoError) {
     BOOST_LOG(error) << "AudioDeviceStart failed: "sv << ca::Status(status);
-    AudioDeviceDestroyIOProcID(self->aggregateDeviceID, self->ioProcID);
+    AudioDeviceDestroyIOProcID(self->captureDeviceID, self->ioProcID);
     return status;
   }
 
