@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <dispatch/dispatch.h>
 #include <mutex>
 
@@ -109,6 +110,9 @@ namespace platf {
   public:
     sck_system_audio_t() = default;
     ~sck_system_audio_t() override {
+      // Restore system output mute state FIRST, before tearing down the stream.
+      muteSystemOutput(false);
+
       // MRC: __strong ivars are no-ops, so release explicitly. Mirror the
       // sck_display_t::stop() drain pattern: wait for stopCapture, drain the
       // serial callback queue, THEN release the delegate (SCStream does NOT
@@ -176,12 +180,20 @@ namespace platf {
     void
     appendSampleBuffer(CMSampleBufferRef sb);
 
+    // Mute/unmute the system output device so the host stays silent during
+    // streaming. SCK captures the audio mix regardless of output device mute
+    // state, so muting the speakers doesn't affect capture quality.
+    void
+    muteSystemOutput(bool mute);
+
     SCStream *stream_ __strong {nil};
     SCKAudioDelegate *delegate_ __strong {nil};
     dispatch_queue_t queue_ __strong {nil};
     TPCircularBuffer buf_ {};
     int channels_ {2};
     std::uint32_t sample_rate_ {48000};
+    AudioObjectID mutedDeviceID_ {kAudioObjectUnknown};  // device we muted (to restore on teardown)
+    bool didMute_ {false};  // whether we actually muted the output
   };
 
   bool
@@ -292,6 +304,15 @@ namespace platf {
 
     BOOST_LOG(info) << "SCK audio: capturing system audio ("sv << channels
                     << "ch @ "sv << sample_rate << "Hz)"sv;
+
+    // Mute the system output so the host stays silent during streaming.
+    // SCK captures the audio mix before it reaches the output device, so
+    // muting the speakers doesn't affect capture. Set SUNSHINE_HOST_AUDIO=1
+    // to keep the host audible.
+    if (!std::getenv("SUNSHINE_HOST_AUDIO")) {
+      muteSystemOutput(true);
+    }
+
     return true;
   }
 
@@ -371,6 +392,77 @@ namespace platf {
       }
     }
     CFRelease(retainedBB);
+  }
+
+  void
+  sck_system_audio_t::muteSystemOutput(bool mute) {
+    if (mute) {
+      // Find the default output device
+      AudioObjectPropertyAddress devAddr = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+      };
+      UInt32 devSize = sizeof(AudioObjectID);
+      AudioObjectID outputDevice = kAudioObjectUnknown;
+      OSStatus s = AudioObjectGetPropertyData(kAudioObjectSystemObject, &devAddr, 0, NULL, &devSize, &outputDevice);
+      if (s != noErr || outputDevice == kAudioObjectUnknown) {
+        BOOST_LOG(warning) << "SCK audio: couldn't find default output device to mute"sv;
+        return;
+      }
+
+      // Check if the device supports muting
+      AudioObjectPropertyAddress muteAddr = {
+        kAudioDevicePropertyMute,
+        kAudioDevicePropertyScopeOutput,
+        kAudioObjectPropertyElementMain
+      };
+      AudioObjectPropertyAddress isSettableAddr = muteAddr;
+      Boolean isSettable = FALSE;
+      OSStatus settableStatus = AudioObjectIsPropertySettable(outputDevice, &isSettableAddr, &isSettable);
+      if (settableStatus != noErr || !isSettable) {
+        BOOST_LOG(info) << "SCK audio: output device doesn't support hardware mute — host will play audio"sv;
+        return;
+      }
+
+      // Read current mute state (to restore later)
+      UInt32 currentMute = 0;
+      UInt32 muteSize = sizeof(currentMute);
+      s = AudioObjectGetPropertyData(outputDevice, &muteAddr, 0, NULL, &muteSize, &currentMute);
+      if (s != noErr) {
+        BOOST_LOG(warning) << "SCK audio: couldn't read output mute state"sv;
+        return;
+      }
+
+      if (currentMute == 0) {
+        // Device is currently unmuted — mute it and remember to restore
+        UInt32 newMute = 1;
+        s = AudioObjectSetPropertyData(outputDevice, &muteAddr, 0, NULL, sizeof(newMute), &newMute);
+        if (s == noErr) {
+          mutedDeviceID_ = outputDevice;
+          didMute_ = true;
+          BOOST_LOG(info) << "SCK audio: muted system output (host stays silent during streaming)"sv;
+        }
+        else {
+          BOOST_LOG(warning) << "SCK audio: failed to mute output device"sv;
+        }
+      }
+    }
+    else {
+      // Restore: unmute the device we muted
+      if (didMute_ && mutedDeviceID_ != kAudioObjectUnknown) {
+        AudioObjectPropertyAddress muteAddr = {
+          kAudioDevicePropertyMute,
+          kAudioDevicePropertyScopeOutput,
+          kAudioObjectPropertyElementMain
+        };
+        UInt32 unmute = 0;
+        AudioObjectSetPropertyData(mutedDeviceID_, &muteAddr, 0, NULL, sizeof(unmute), &unmute);
+        BOOST_LOG(info) << "SCK audio: restored system output (unmuted)"sv;
+        didMute_ = false;
+        mutedDeviceID_ = kAudioObjectUnknown;
+      }
+    }
   }
 
   capture_e

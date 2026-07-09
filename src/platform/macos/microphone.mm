@@ -86,17 +86,22 @@ namespace platf {
       // the equivalent of WASAPI loopback on Windows / PulseAudio monitor on
       // Linux). On macOS that is system audio.
       //
-      // Capture path priority (macOS 14.0+):
-      // 1. Core Audio Process Tap — the official, native approach. No third-party
-      //    driver needed. Requires NSAudioCaptureUsageDescription in Info.plist
-      //    and "System Audio Recording" TCC consent. This is what LizardByte
-      //    Sunshine uses in production (PR #4209). The hostAudioEnabled flag
-      //    controls CATapMuted/CATapUnmuted so the host can stay silent.
-      // 2. BlackHole virtual loopback — fallback if Tap unavailable or denied.
-      //    NOTE: BlackHole is BROKEN on macOS 26 (Tahoe) due to CoreAudio stack
-      //    changes — the driver's ring-buffer mirroring no longer works.
-      // 3. ScreenCaptureKit audio — last resort.
-      // 4. AVFoundation microphone — only for explicit mic input (config::audio.sink).
+      // Capture path priority depends on macOS version:
+      //
+      // macOS 26+ (Tahoe):
+      //   1. ScreenCaptureKit audio — the ONLY working path. Both BlackHole
+      //      (loopback broken by CoreAudio stack change) and Process Tap
+      //      (AudioDeviceCreateIOProcID hangs indefinitely) are broken.
+      //      SCK has no host-mute API, so to keep the host silent we mute the
+      //      system output device via Core Audio while streaming.
+      //
+      // macOS 14-25:
+      //   1. Core Audio Process Tap — native, no driver. hostAudioEnabled flag
+      //      controls CATapMuted/CATapUnmuted so the host can stay silent.
+      //   2. ScreenCaptureKit audio — fallback if Tap fails.
+      //   3. BlackHole — fallback for pre-macOS 14 or if Tap + SCK both fail.
+      //
+      // AVFoundation microphone is only used for explicit config::audio.sink.
       (void) mapping;
       (void) continuous_audio;
 
