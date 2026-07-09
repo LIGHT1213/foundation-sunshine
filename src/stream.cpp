@@ -3022,10 +3022,11 @@ namespace stream {
 
       // 仅控制流会话没有视频/音频线程
       if (!session.control_only) {
-        BOOST_LOG(debug) << "Waiting for video to end..."sv;
+        BOOST_LOG(info) << "session::join: waiting for videoThread..."sv;
         session.videoThread.join();
-        BOOST_LOG(debug) << "Waiting for audio to end..."sv;
+        BOOST_LOG(info) << "session::join: videoThread joined, waiting for audioThread..."sv;
         session.audioThread.join();
+        BOOST_LOG(info) << "session::join: audioThread joined"sv;
       }
       else {
         BOOST_LOG(debug) << "Control-only session: skipping video/audio thread join"sv;

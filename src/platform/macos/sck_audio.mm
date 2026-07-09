@@ -116,11 +116,46 @@ namespace platf {
         [stream_ stopCaptureWithCompletionHandler:^(NSError * _Nullable) {
           dispatch_semaphore_signal(stopSem);
         }];
-        dispatch_semaphore_wait(stopSem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        bool stopped = dispatch_semaphore_wait(stopSem,
+          dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0;
         [stopSem release];
-        if (queue_) { dispatch_sync(queue_, ^{}); }
-        [stream_ release];
-        stream_ = nil;
+        if (stopped) {
+          // Bounded drain: a bare dispatch_sync(queue_, ^{}) can hang forever
+          // if SCK scheduled work that never completes during teardown. We
+          // bound the drain and, on timeout, leak the queue+delegate+stream to
+          // avoid a use-after-free (a hang is worse than a leak here — this
+          // destructor runs on the session::join critical path).
+          if (queue_) {
+            dispatch_semaphore_t drainSem = dispatch_semaphore_create(0);
+            dispatch_async(queue_, ^{
+              dispatch_semaphore_signal(drainSem);
+            });
+            bool drained = dispatch_semaphore_wait(drainSem,
+              dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC)) == 0;
+            [drainSem release];
+            if (!drained) {
+              BOOST_LOG(warning) << "SCK audio: drain timed out; leaking stream/queue/delegate to avoid hang"sv;
+              // Leak to avoid UAF: do NOT release delegate_/queue_/stream_.
+              stream_ = nil;
+              delegate_ = nil;
+              queue_ = nil;
+              TPCircularBufferCleanup(&buf_);
+              return;
+            }
+          }
+          [stream_ release];
+          stream_ = nil;
+        }
+        else {
+          // stopCapture timed out: the stream may still be delivering callbacks,
+          // so leaking is safer than releasing. This mirrors sck_display_t::stop().
+          BOOST_LOG(warning) << "SCK audio: stopCapture timed out; leaking stream to avoid UAF"sv;
+          stream_ = nil;  // leak
+          delegate_ = nil;
+          queue_ = nil;
+          TPCircularBufferCleanup(&buf_);
+          return;
+        }
       }
       if (delegate_) { [delegate_ release]; delegate_ = nil; }
       if (queue_) { dispatch_release(queue_); queue_ = nil; }
@@ -219,6 +254,11 @@ namespace platf {
     if (!added || addErr) {
       const char *m = addErr ? addErr.localizedDescription.UTF8String : "unknown";
       BOOST_LOG(error) << "SCK audio: addStreamOutput failed: "sv << m;
+      // Cleanup half-allocated members so the destructor doesn't call stopCapture
+      // on a stream that never fully started (which can hang SCK internals).
+      if (queue_) { dispatch_release(queue_); queue_ = nil; }
+      if (delegate_) { [delegate_ release]; delegate_ = nil; }
+      if (stream_) { [stream_ release]; stream_ = nil; }
       return false;
     }
 
@@ -231,6 +271,9 @@ namespace platf {
     // 5s timeout for stream start (capture backend init can be slow on first grant).
     if (dispatch_semaphore_wait(startSem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
       BOOST_LOG(error) << "SCK audio: startCapture timed out."sv;
+      if (queue_) { dispatch_release(queue_); queue_ = nil; }
+      if (delegate_) { [delegate_ release]; delegate_ = nil; }
+      if (stream_) { [stream_ release]; stream_ = nil; }
       return false;
     }
 
@@ -238,6 +281,9 @@ namespace platf {
       const char *m = startErr.localizedDescription.UTF8String;
       BOOST_LOG(error) << "SCK audio: startCapture failed: "sv << (m ? m : "unknown");
       [startErr release];
+      if (queue_) { dispatch_release(queue_); queue_ = nil; }
+      if (delegate_) { [delegate_ release]; delegate_ = nil; }
+      if (stream_) { [stream_ release]; stream_ = nil; }
       return false;
     }
 
@@ -311,12 +357,13 @@ namespace platf {
       void *tail = TPCircularBufferTail(&buf_, &length);
       if (!tail || length == 0) {
         // Nothing buffered: wait briefly for the next SCK audio frame. A bounded
-        // timeout (3s) ensures sample() can't hang forever if the stream stops
-        // or permission is revoked mid-session; we surface a timeout so the
-        // caller can restart rather than deadlock.
+        // timeout (1s) keeps the sampling loop responsive to shutdown — the
+        // caller's while(!shutdown_event->peek()) only re-checks between sample()
+        // calls, so a long wait here delays session teardown and risks the 10s
+        // hang deadline. On timeout we surface capture_e::timeout so the caller
+        // can loop back and observe shutdown.
         if (dispatch_semaphore_wait(delegate_->frameSignal_,
-              dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
-          BOOST_LOG(warning) << "SCK audio: timed out waiting for audio frame."sv;
+              dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC)) != 0) {
           return capture_e::timeout;
         }
         continue;

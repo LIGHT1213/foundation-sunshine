@@ -572,8 +572,21 @@ namespace audio {
         case platf::capture_e::timeout:
           continue;
         case platf::capture_e::reinit:
+          // Shutdown requested: don't rebuild the mic on the join critical path.
+          // ~sck_system_audio_t() (stopCapture + drain) and init() (SCShareableContent +
+          // startCapture) together can exceed the 10s hang deadline. Bail out fast.
+          if (shutdown_event->peek()) {
+            BOOST_LOG(info) << "Audio reinit skipped (shutdown requested)"sv;
+            return;
+          }
           BOOST_LOG(info) << "Reinitializing audio capture"sv;
           mic.reset();
+          // Re-check after the (potentially slow) teardown: shutdown may have been
+          // raised while mic.reset() blocked in ~sck_system_audio_t().
+          if (shutdown_event->peek()) {
+            BOOST_LOG(info) << "Audio reinit skipped after teardown (shutdown requested)"sv;
+            return;
+          }
           do {
             mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size, continuous_audio);
             if (!mic) {

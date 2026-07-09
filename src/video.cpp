@@ -433,7 +433,10 @@ namespace video {
 
     avcodec_encode_session_t(avcodec_encode_session_t &&other) noexcept = default;
     ~avcodec_encode_session_t() {
-      // Flush any remaining frames in the encoder
+      // Flush any remaining frames in the encoder. VideoToolbox's drain is
+      // normally fast, but log around it so a slow teardown shows up clearly
+      // in the session::join window (we run on the capture_async thread).
+      BOOST_LOG(info) << "encode session: flushing encoder"sv;
       if (avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
         packet_raw_avcodec pkt;
         while (avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet) == 0);
@@ -442,6 +445,7 @@ namespace video {
       // Order matters here because the context relies on the hwdevice still being valid
       avcodec_ctx.reset();
       device.reset();
+      BOOST_LOG(info) << "encode session: teardown complete"sv;
     }
 
     // Ensure objects are destroyed in the correct order
